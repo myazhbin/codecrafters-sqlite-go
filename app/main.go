@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +13,7 @@ import (
 
 // Usage: your_program.sh sample.db .dbinfo
 //
-//	your_program.sh sample.db "SELECT COUNT(*) FROM apples"
+//	your_program.sh sample.db "SELECT name FROM apples"
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "Usage: your_program.sh <database file> <command>")
@@ -27,7 +28,7 @@ func main() {
 
 // run executes command against the database file at databaseFilePath and
 // writes the command's output to stdout.
-func run(databaseFilePath, command string, stdout io.Writer) error {
+func run(databaseFilePath, command string, stdout io.Writer) (err error) {
 	databaseFile, err := os.Open(databaseFilePath)
 	if err != nil {
 		return err
@@ -39,16 +40,24 @@ func run(databaseFilePath, command string, stdout io.Writer) error {
 		return err
 	}
 
+	// A command can write many lines, so buffer its output.
+	output := bufio.NewWriter(stdout)
+	defer func() {
+		if flushErr := output.Flush(); err == nil {
+			err = flushErr
+		}
+	}()
+
 	switch {
 	case command == ".dbinfo":
-		return printDBInfo(db, stdout)
+		return printDBInfo(db, output)
 	case command == ".tables":
-		return printTables(db, stdout)
+		return printTables(db, output)
 	case strings.HasPrefix(command, "."):
 		return fmt.Errorf("Unknown command %s", command)
 	default:
 		// Anything that isn't a dot command is a SQL statement.
-		return executeSQL(db, command, stdout)
+		return executeSQL(db, command, output)
 	}
 }
 

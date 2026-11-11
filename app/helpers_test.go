@@ -68,6 +68,26 @@ func createDatabase(t *testing.T, sql string) string {
 	return path
 }
 
+// sqlite3Output runs a SQL statement against the database file at path with
+// the sqlite3 command-line shell, and returns what the shell prints. The
+// calling test is skipped if sqlite3 isn't installed.
+func sqlite3Output(t *testing.T, path, sql string) string {
+	t.Helper()
+
+	sqlite3, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 is not installed")
+	}
+
+	// The options select the default output format of the shell, whatever
+	// the configuration of the user that runs the tests.
+	output, err := exec.Command(sqlite3, "-batch", "-list", "-noheader", path, sql).Output()
+	if err != nil {
+		t.Fatalf("sqlite3 failed to run %q: %v", sql, err)
+	}
+	return string(output)
+}
+
 // newHeader builds a database header whose page size field holds the given
 // raw (on-disk) value.
 func newHeader(rawPageSize uint16) []byte {

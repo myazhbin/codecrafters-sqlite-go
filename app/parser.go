@@ -3,40 +3,57 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // selectStatement is a parsed SELECT statement.
 type selectStatement struct {
+	// count reports whether the statement selects COUNT(*), the number of
+	// rows, rather than a column.
+	count bool
+	// column is the name of the column to select. It is empty if count is
+	// set.
+	column string
 	// table is the name of the table to read from.
 	table string
 }
 
-// parseSelect parses a SELECT statement. The only supported form is:
+// parseSelect parses a SELECT statement. The supported forms are:
 //
 //	SELECT COUNT(*) FROM table
+//	SELECT column FROM table
 func parseSelect(sql string) (*selectStatement, error) {
 	tokens, err := tokenize(sql)
 	if err != nil {
 		return nil, err
 	}
 	p := &parser{tokens: tokens}
+	statement := &selectStatement{}
 
 	if err := p.expectKeyword("SELECT"); err != nil {
 		return nil, err
 	}
-	if err := p.expectKeyword("COUNT"); err != nil {
+	name, err := p.expectName()
+	if err != nil {
 		return nil, err
 	}
-	for _, symbol := range []string{"(", "*", ")"} {
-		if err := p.expectSymbol(symbol); err != nil {
+	if p.acceptSymbol("(") {
+		// A name that is followed by a parenthesis is a function call.
+		if !strings.EqualFold(name, "COUNT") {
+			return nil, fmt.Errorf("no such function: %s", name)
+		}
+		if err := p.expectSymbols("*", ")"); err != nil {
 			return nil, err
 		}
+		statement.count = true
+	} else {
+		statement.column = name
 	}
+
 	if err := p.expectKeyword("FROM"); err != nil {
 		return nil, err
 	}
-	table, err := p.expectName()
-	if err != nil {
+	if statement.table, err = p.expectName(); err != nil {
 		return nil, err
 	}
 
@@ -45,8 +62,7 @@ func parseSelect(sql string) (*selectStatement, error) {
 	if t := p.peek(); t.kind != tokenEOF {
 		return nil, syntaxError(t)
 	}
-
-	return &selectStatement{table: table}, nil
+	return statement, nil
 }
 
 // parser reads through the tokens of a SQL statement.
@@ -89,6 +105,16 @@ func (p *parser) expectKeyword(keyword string) error {
 	return nil
 }
 
+// expectKeywords consumes the next tokens, which must be the given keywords.
+func (p *parser) expectKeywords(keywords ...string) error {
+	for _, keyword := range keywords {
+		if err := p.expectKeyword(keyword); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // acceptSymbol consumes the next token if it is the given symbol. It reports
 // whether it did.
 func (p *parser) acceptSymbol(symbol string) bool {
@@ -107,15 +133,42 @@ func (p *parser) expectSymbol(symbol string) error {
 	return nil
 }
 
-// expectName consumes the next token, which must be an identifier, and
-// returns the name it holds.
+// expectSymbols consumes the next tokens, which must be the given symbols.
+func (p *parser) expectSymbols(symbols ...string) error {
+	for _, symbol := range symbols {
+		if err := p.expectSymbol(symbol); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// expectName consumes the next token, which must be the name of something
+// like a table or a column, and returns the name. A keyword that SQLite
+// reserves can only be used as a name when it is quoted.
 func (p *parser) expectName() (string, error) {
 	t := p.peek()
-	if t.kind != tokenIdentifier {
+	if t.kind != tokenIdentifier || (!t.quoted && reservedKeywords[strings.ToUpper(t.text)]) {
 		return "", syntaxError(t)
 	}
 	p.next()
 	return t.text, nil
+}
+
+// reservedKeywords holds the keywords that SQLite doesn't accept as names
+// unless they are quoted. SQLite has many more keywords, but it falls back to
+// reading those as names where a name is expected.
+var reservedKeywords = map[string]bool{
+	"ADD": true, "ALL": true, "ALTER": true, "AND": true, "AS": true, "AUTOINCREMENT": true,
+	"BETWEEN": true, "CASE": true, "CHECK": true, "COLLATE": true, "COMMIT": true, "CONSTRAINT": true,
+	"CREATE": true, "DEFAULT": true, "DEFERRABLE": true, "DELETE": true, "DISTINCT": true, "DROP": true,
+	"ELSE": true, "ESCAPE": true, "EXCEPT": true, "EXISTS": true, "FOREIGN": true, "FROM": true,
+	"GROUP": true, "HAVING": true, "IN": true, "INDEX": true, "INSERT": true, "INTERSECT": true,
+	"INTO": true, "IS": true, "ISNULL": true, "JOIN": true, "LIMIT": true, "NOT": true,
+	"NOTHING": true, "NOTNULL": true, "NULL": true, "ON": true, "OR": true, "ORDER": true,
+	"PRIMARY": true, "REFERENCES": true, "RETURNING": true, "SELECT": true, "SET": true, "TABLE": true,
+	"THEN": true, "TO": true, "TRANSACTION": true, "UNION": true, "UNIQUE": true, "UPDATE": true,
+	"USING": true, "VALUES": true, "WHEN": true, "WHERE": true,
 }
 
 // syntaxError returns the error for a token that can't appear where it does.
