@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"math"
-	"strconv"
 	"strings"
 )
 
@@ -19,9 +17,13 @@ func executeSQL(db *database, sql string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	where, err := newFilter(table, statement.where)
+	if err != nil {
+		return err
+	}
 
 	if statement.count {
-		rowCount, err := db.countRows(table)
+		rowCount, err := db.countMatchingRows(table, where)
 		if err != nil {
 			return err
 		}
@@ -40,6 +42,9 @@ func executeSQL(db *database, sql string, stdout io.Writer) error {
 	// values of a row with pipes.
 	fields := make([]string, len(columns))
 	return db.scanTable(table, func(r row) error {
+		if !where.matches(r) {
+			return nil
+		}
 		for i, column := range columns {
 			fields[i] = formatValue(r.value(column))
 		}
@@ -48,46 +53,95 @@ func executeSQL(db *database, sql string, stdout io.Writer) error {
 	})
 }
 
-// formatValue returns the text that the sqlite3 command-line shell displays
-// for a value.
-func formatValue(value any) string {
-	switch v := value.(type) {
-	case int64:
-		return strconv.FormatInt(v, 10)
-	case float64:
-		return formatFloat(v)
-	case string:
-		return v
-	case []byte:
-		return string(v)
-	default:
-		// NULL is displayed as an empty string.
-		return ""
+// countMatchingRows returns the number of rows of a table that meet the
+// condition of a WHERE clause.
+func (db *database) countMatchingRows(t *table, where *filter) (int, error) {
+	if where == nil {
+		// Counting all the rows of a table doesn't take reading them.
+		return db.countRows(t)
 	}
+
+	rowCount := 0
+	err := db.scanTable(t, func(r row) error {
+		if where.matches(r) {
+			rowCount++
+		}
+		return nil
+	})
+	return rowCount, err
 }
 
-// formatFloat returns the text that SQLite converts a floating point number
-// to, which is the result of formatting it with "%!.15g": at most 15
-// significant digits, with a decimal point and at least one digit after it.
-func formatFloat(f float64) string {
-	switch {
-	case math.IsInf(f, 1):
-		return "Inf"
-	case math.IsInf(f, -1):
-		return "-Inf"
-	case f == 0:
-		// SQLite doesn't display the sign of a negative zero.
-		return "0.0"
+// filter is the condition of a WHERE clause, resolved against the table whose
+// rows it selects.
+type filter struct {
+	// column is the index of the column to compare.
+	column int
+	// operator is the comparison operator: =, !=, <, <=, > or >=.
+	operator string
+	// value is the value to compare the column with.
+	value any
+	// collation is the collating sequence to compare TEXT values with.
+	collation string
+}
+
+// newFilter resolves the condition of a WHERE clause against a table. It
+// returns nil if there is no condition.
+func newFilter(t *table, condition *comparison) (*filter, error) {
+	if condition == nil {
+		return nil, nil
 	}
 
-	text := strconv.FormatFloat(f, 'g', 15, 64)
-	if strings.Contains(text, ".") {
-		return text
+	index, err := t.columnIndex(condition.column)
+	if err != nil {
+		return nil, err
 	}
-	// Add the missing fractional part, before the exponent if there is one.
-	mantissa, exponent, hasExponent := strings.Cut(text, "e")
-	if hasExponent {
-		return mantissa + ".0e" + exponent
+	column := t.columns[index]
+
+	// A comparison uses the collating sequence of its column.
+	collation := column.collation
+	switch collation {
+	case "":
+		collation = collationBinary
+	case collationBinary, collationNoCase, collationRTrim:
+	default:
+		return nil, fmt.Errorf("no such collation sequence: %s", collation)
 	}
-	return mantissa + ".0"
+
+	return &filter{
+		column:    index,
+		operator:  condition.operator,
+		value:     convertForComparison(condition.value, column.affinity()),
+		collation: collation,
+	}, nil
+}
+
+// matches reports whether a row meets the condition. Every row meets a nil
+// filter, which stands for the absence of a WHERE clause.
+func (f *filter) matches(r row) bool {
+	if f == nil {
+		return true
+	}
+
+	value := r.value(f.column)
+	if value == nil || f.value == nil {
+		// A comparison with NULL is neither true nor false, so the row isn't
+		// selected.
+		return false
+	}
+
+	order := compareValues(value, f.value, f.collation)
+	switch f.operator {
+	case "=":
+		return order == 0
+	case "!=":
+		return order != 0
+	case "<":
+		return order < 0
+	case "<=":
+		return order <= 0
+	case ">":
+		return order > 0
+	default:
+		return order >= 0
+	}
 }

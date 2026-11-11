@@ -24,26 +24,15 @@ type columnDefinition struct {
 	// declaredType is the type that the column is declared with, in upper
 	// case. It is empty for a column that is declared without a type.
 	declaredType string
+	// collation is the name of the collating sequence that the column is
+	// declared with, in upper case. It is empty for a column that is declared
+	// without one, which then uses the default of collationBinary.
+	collation string
 }
 
-// hasRealAffinity reports whether SQLite prefers to store the values of the
-// column as floating point numbers. SQLite derives that from the declared
-// type of the column.
-func (c columnDefinition) hasRealAffinity() bool {
-	contains := func(substrings ...string) bool {
-		for _, substring := range substrings {
-			if strings.Contains(c.declaredType, substring) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// The rules for integer, text and blob affinity come first.
-	if contains("INT", "CHAR", "CLOB", "TEXT", "BLOB") {
-		return false
-	}
-	return contains("REAL", "FLOA", "DOUB")
+// affinity returns the type that the column prefers to store its values as.
+func (c columnDefinition) affinity() affinity {
+	return typeAffinity(c.declaredType)
 }
 
 // tableConstraintKeywords are the keywords that start a table constraint,
@@ -265,6 +254,8 @@ func parseColumnDefinition(definition []token) (column columnDefinition, isRowID
 			// The values of generated columns may not be stored in the rows
 			// of the table.
 			return columnDefinition{}, false, errors.New("tables with generated columns are not supported")
+		case t.isKeyword("COLLATE") && following(1).kind == tokenIdentifier:
+			column.collation = strings.ToUpper(following(1).text)
 		case t.isKeyword("PRIMARY") && following(1).isKeyword("KEY"):
 			// A column declared as INTEGER PRIMARY KEY is an alias for the
 			// rowid. Due to a quirk of SQLite, that's not the case for

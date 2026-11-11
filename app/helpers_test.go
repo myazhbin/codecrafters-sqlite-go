@@ -153,6 +153,18 @@ func buildDatabase(pageSize int, pages ...testPage) []byte {
 	return data
 }
 
+// writeDatabaseFile writes the contents of a database file to a temporary
+// directory and returns the path of the file.
+func writeDatabaseFile(t *testing.T, data []byte) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "test.db")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // newTestDatabase returns a database that reads the given file contents.
 func newTestDatabase(t *testing.T, data []byte) *database {
 	t.Helper()

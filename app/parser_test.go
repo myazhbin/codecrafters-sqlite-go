@@ -68,6 +68,119 @@ func TestParseSelect(t *testing.T) {
 	}
 }
 
+func TestParseSelectWhere(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want comparison
+	}{
+		{
+			"text",
+			"SELECT name, color FROM apples WHERE color = 'Yellow'",
+			comparison{column: "color", operator: "=", value: "Yellow"},
+		},
+		{
+			"lowercase keywords",
+			"select name from apples where color = 'Yellow'",
+			comparison{column: "color", operator: "=", value: "Yellow"},
+		},
+		{
+			"no optional whitespace",
+			"SELECT name FROM apples WHERE color='Yellow';",
+			comparison{column: "color", operator: "=", value: "Yellow"},
+		},
+		{
+			"count",
+			"SELECT COUNT(*) FROM apples WHERE color = 'Yellow'",
+			comparison{column: "color", operator: "=", value: "Yellow"},
+		},
+		{
+			"quoted column",
+			`SELECT name FROM companies WHERE "size range" = '1 - 10'`,
+			comparison{column: "size range", operator: "=", value: "1 - 10"},
+		},
+		{"empty text", "SELECT a FROM t WHERE a = ''", comparison{column: "a", operator: "=", value: ""}},
+		{"text with a quote", "SELECT a FROM t WHERE a = 'it''s'", comparison{column: "a", operator: "=", value: "it's"}},
+		{
+			"text that looks like SQL",
+			"SELECT a FROM t WHERE a = 'x'' OR 1 = 1 --'",
+			comparison{column: "a", operator: "=", value: "x' OR 1 = 1 --"},
+		},
+
+		{"double equals", "SELECT a FROM t WHERE a == 'x'", comparison{column: "a", operator: "=", value: "x"}},
+		{"not equal", "SELECT a FROM t WHERE a != 'x'", comparison{column: "a", operator: "!=", value: "x"}},
+		{"not equal with brackets", "SELECT a FROM t WHERE a <> 'x'", comparison{column: "a", operator: "!=", value: "x"}},
+		{"less than", "SELECT a FROM t WHERE a < 'x'", comparison{column: "a", operator: "<", value: "x"}},
+		{"less than or equal", "SELECT a FROM t WHERE a <= 'x'", comparison{column: "a", operator: "<=", value: "x"}},
+		{"greater than", "SELECT a FROM t WHERE a > 'x'", comparison{column: "a", operator: ">", value: "x"}},
+		{"greater than or equal", "SELECT a FROM t WHERE a>=3", comparison{column: "a", operator: ">=", value: int64(3)}},
+
+		{"integer", "SELECT a FROM t WHERE a = 42", comparison{column: "a", operator: "=", value: int64(42)}},
+		{"negative integer", "SELECT a FROM t WHERE a = -42", comparison{column: "a", operator: "=", value: int64(-42)}},
+		{"integer with a plus sign", "SELECT a FROM t WHERE a = +42", comparison{column: "a", operator: "=", value: int64(42)}},
+		{"sign apart from its number", "SELECT a FROM t WHERE a = - 42", comparison{column: "a", operator: "=", value: int64(-42)}},
+		{
+			"smallest integer",
+			"SELECT a FROM t WHERE a = -9223372036854775808",
+			comparison{column: "a", operator: "=", value: int64(-9223372036854775808)},
+		},
+		{
+			"integer that is too large",
+			"SELECT a FROM t WHERE a = 9223372036854775808",
+			comparison{column: "a", operator: "=", value: 9223372036854775808.0},
+		},
+		{"real", "SELECT a FROM t WHERE a = 1.5", comparison{column: "a", operator: "=", value: 1.5}},
+		{"negative real", "SELECT a FROM t WHERE a = -.5", comparison{column: "a", operator: "=", value: -0.5}},
+		{"real without fraction digits", "SELECT a FROM t WHERE a = 2.", comparison{column: "a", operator: "=", value: 2.0}},
+		{"real with an exponent", "SELECT a FROM t WHERE a = 1e3", comparison{column: "a", operator: "=", value: 1000.0}},
+		{"null", "SELECT a FROM t WHERE a = NULL", comparison{column: "a", operator: "=", value: nil}},
+		{"lowercase null", "SELECT a FROM t WHERE a != null", comparison{column: "a", operator: "!=", value: nil}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			statement, err := parseSelect(tt.sql)
+			if err != nil {
+				t.Fatalf("parseSelect(%q) returned an error: %v", tt.sql, err)
+			}
+			if statement.where == nil {
+				t.Fatalf("parseSelect(%q) found no WHERE clause", tt.sql)
+			}
+			if !reflect.DeepEqual(*statement.where, tt.want) {
+				t.Errorf("parseSelect(%q).where = %#v, want %#v", tt.sql, *statement.where, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseSelectWithoutWhere(t *testing.T) {
+	for _, sql := range []string{"SELECT name FROM apples", "SELECT COUNT(*) FROM apples;"} {
+		statement, err := parseSelect(sql)
+		if err != nil {
+			t.Fatalf("parseSelect(%q) returned an error: %v", sql, err)
+		}
+		if statement.where != nil {
+			t.Errorf("parseSelect(%q).where = %#v, want nil", sql, *statement.where)
+		}
+	}
+}
+
+func TestParseSelectKeepsTheRestOfAStatementWithWhere(t *testing.T) {
+	got, err := parseSelect("SELECT name, color FROM apples WHERE color = 'Yellow'")
+	if err != nil {
+		t.Fatalf("parseSelect returned an error: %v", err)
+	}
+
+	want := selectStatement{
+		columns: []string{"name", "color"},
+		table:   "apples",
+		where:   &comparison{column: "color", operator: "=", value: "Yellow"},
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Errorf("parseSelect = %+v, want %+v", *got, want)
+	}
+}
+
 func TestParseSelectRejectsInvalidStatements(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -115,6 +228,25 @@ func TestParseSelectRejectsInvalidStatements(t *testing.T) {
 			"SELECT COUNT(*), COUNT(*) FROM apples",
 			"selecting COUNT(*) along with other columns is not supported",
 		},
+
+		{"empty WHERE clause", "SELECT name FROM apples WHERE", "incomplete input"},
+		{"WHERE clause without an operator", "SELECT name FROM apples WHERE color", "incomplete input"},
+		{"WHERE clause without a value", "SELECT name FROM apples WHERE color =", "incomplete input"},
+		{"WHERE clause that ends with a sign", "SELECT name FROM apples WHERE id = -", "incomplete input"},
+		{"WHERE clause without a column", "SELECT name FROM apples WHERE = 'Yellow'", `near "=": syntax error`},
+		{"missing operator", "SELECT name FROM apples WHERE color 'Yellow'", `near "Yellow": syntax error`},
+		{"unsupported operator", "SELECT name FROM apples WHERE color LIKE 'Y%'", `near "LIKE": syntax error`},
+		{"IS NULL", "SELECT name FROM apples WHERE color IS NULL", `near "IS": syntax error`},
+		{"tripled equals sign", "SELECT name FROM apples WHERE color === 'Yellow'", `near "=": syntax error`},
+		{"value before the column", "SELECT name FROM apples WHERE 'Yellow' = color", `near "Yellow": syntax error`},
+		{"column as value", "SELECT name FROM apples WHERE color = name", `near "name": syntax error`},
+		{"signed text", "SELECT name FROM apples WHERE color = -'Yellow'", `near "Yellow": syntax error`},
+		{"doubled sign", "SELECT name FROM apples WHERE id = --1", "incomplete input"},
+		{"two values", "SELECT name FROM apples WHERE color = 'Yellow' 'Red'", `near "Red": syntax error`},
+		{"two conditions", "SELECT name FROM apples WHERE color = 'Yellow' AND id = 4", `near "AND": syntax error`},
+		{"two WHERE clauses", "SELECT name FROM apples WHERE id = 1 WHERE id = 2", `near "WHERE": syntax error`},
+		{"WHERE before FROM", "SELECT name WHERE id = 1 FROM apples", `near "WHERE": syntax error`},
+		{"unterminated text", "SELECT name FROM apples WHERE color = 'Yellow", "unterminated string literal: 'Yellow"},
 		{"unterminated string", "SELECT COUNT(*) FROM 'apples", "unterminated string literal: 'apples"},
 	}
 

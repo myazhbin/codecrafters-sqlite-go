@@ -105,8 +105,29 @@ func TestParseCreateTable(t *testing.T) {
 				e TEXT CONSTRAINT named NOT NULL
 			)`,
 			tableDefinition{
-				name:        "t",
-				columns:     columns("a", "TEXT", "b", "INT", "c", "", "d", "", "e", "TEXT"),
+				name: "t",
+				columns: []columnDefinition{
+					{name: "a", declaredType: "TEXT", collation: "NOCASE"},
+					{name: "b", declaredType: "INT"},
+					{name: "c"},
+					{name: "d"},
+					{name: "e", declaredType: "TEXT"},
+				},
+				rowIDColumn: -1,
+			},
+		},
+		{
+			"collating sequences",
+			`CREATE TABLE t (a TEXT COLLATE NOCASE, b TEXT collate rtrim NOT NULL, c TEXT, d COLLATE "binary", e TEXT DEFAULT ('COLLATE x'))`,
+			tableDefinition{
+				name: "t",
+				columns: []columnDefinition{
+					{name: "a", declaredType: "TEXT", collation: "NOCASE"},
+					{name: "b", declaredType: "TEXT", collation: "RTRIM"},
+					{name: "c", declaredType: "TEXT"},
+					{name: "d", collation: "BINARY"},
+					{name: "e", declaredType: "TEXT"},
+				},
 				rowIDColumn: -1,
 			},
 		},
@@ -258,40 +279,6 @@ func TestParseCreateTableRejectsInvalidStatements(t *testing.T) {
 				t.Errorf("parseCreateTable(%q) returned error %q, want %q", tt.sql, err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestColumnDefinitionHasRealAffinity(t *testing.T) {
-	tests := []struct {
-		declaredType string
-		want         bool
-	}{
-		{"REAL", true},
-		{"DOUBLE", true},
-		{"DOUBLE PRECISION", true},
-		{"FLOAT", true},
-		{"INTEGER", false},
-		{"INT", false},
-		{"TEXT", false},
-		{"VARCHAR", false},
-		{"BLOB", false},
-		{"", false},
-		{"NUMERIC", false},
-		{"DECIMAL", false},
-		{"BOOLEAN", false},
-		{"DATETIME", false},
-		// The rule for integer affinity comes first: "FLOATING POINT" contains
-		// "INT".
-		{"FLOATING POINT", false},
-		// So does the rule for text affinity.
-		{"REAL TEXT", false},
-	}
-
-	for _, tt := range tests {
-		column := columnDefinition{name: "c", declaredType: tt.declaredType}
-		if got := column.hasRealAffinity(); got != tt.want {
-			t.Errorf("column of type %q: hasRealAffinity() = %t, want %t", tt.declaredType, got, tt.want)
-		}
 	}
 }
 

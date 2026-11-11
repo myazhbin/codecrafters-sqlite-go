@@ -79,7 +79,7 @@ func (r row) value(column int) any {
 	}
 
 	value := r.values[column]
-	if integer, ok := value.(int64); ok && r.table.columns[column].hasRealAffinity() {
+	if integer, ok := value.(int64); ok && r.table.columns[column].affinity() == affinityReal {
 		// To save space, SQLite stores a floating point number without a
 		// fractional part as an integer.
 		return float64(integer)

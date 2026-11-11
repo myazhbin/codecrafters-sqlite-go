@@ -16,12 +16,33 @@ type selectStatement struct {
 	columns []string
 	// table is the name of the table to read from.
 	table string
+	// where is the condition that the rows to select must meet. It is nil if
+	// the statement has no WHERE clause.
+	where *comparison
+}
+
+// comparison is a condition that compares the value of a column with a
+// literal value, like color = 'Yellow'.
+type comparison struct {
+	// column is the name of the column.
+	column string
+	// operator is the comparison operator: =, !=, <, <=, > or >=.
+	operator string
+	// value is the literal value: a string, an int64, a float64, or nil for
+	// NULL.
+	value any
+}
+
+// comparisonOperators maps the comparison operators that can be written in
+// SQL to the operators of a comparison.
+var comparisonOperators = map[string]string{
+	"=": "=", "==": "=", "!=": "!=", "<>": "!=", "<": "<", "<=": "<=", ">": ">", ">=": ">=",
 }
 
 // parseSelect parses a SELECT statement. The supported forms are:
 //
-//	SELECT COUNT(*) FROM table
-//	SELECT column, ... FROM table
+//	SELECT COUNT(*) FROM table [WHERE column operator literal]
+//	SELECT column, ... FROM table [WHERE column operator literal]
 func parseSelect(sql string) (*selectStatement, error) {
 	tokens, err := tokenize(sql)
 	if err != nil {
@@ -64,6 +85,11 @@ func parseSelect(sql string) (*selectStatement, error) {
 	}
 	if statement.table, err = p.expectName(); err != nil {
 		return nil, err
+	}
+	if p.acceptKeyword("WHERE") {
+		if statement.where, err = p.parseComparison(); err != nil {
+			return nil, err
+		}
 	}
 
 	// A statement may end with a semicolon.
@@ -178,6 +204,52 @@ var reservedKeywords = map[string]bool{
 	"PRIMARY": true, "REFERENCES": true, "RETURNING": true, "SELECT": true, "SET": true, "TABLE": true,
 	"THEN": true, "TO": true, "TRANSACTION": true, "UNION": true, "UNIQUE": true, "UPDATE": true,
 	"USING": true, "VALUES": true, "WHEN": true, "WHERE": true,
+}
+
+// parseComparison parses a comparison of a column with a literal value.
+func (p *parser) parseComparison() (*comparison, error) {
+	column, err := p.expectName()
+	if err != nil {
+		return nil, err
+	}
+
+	t := p.peek()
+	operator, ok := comparisonOperators[t.text]
+	if t.kind != tokenSymbol || !ok {
+		return nil, syntaxError(t)
+	}
+	p.next()
+
+	value, err := p.parseLiteral()
+	if err != nil {
+		return nil, err
+	}
+	return &comparison{column: column, operator: operator, value: value}, nil
+}
+
+// parseLiteral parses a literal value: a string, a number or NULL.
+func (p *parser) parseLiteral() (any, error) {
+	t := p.next()
+	sign := ""
+	if t.isSymbol("-") || t.isSymbol("+") {
+		// A sign must be followed by a number.
+		sign = t.text
+		if t = p.next(); t.kind != tokenNumber {
+			return nil, syntaxError(t)
+		}
+	}
+
+	switch {
+	case t.kind == tokenString:
+		return t.text, nil
+	case t.kind == tokenNumber:
+		if number, ok := parseNumber(sign + t.text); ok {
+			return number, nil
+		}
+	case t.isKeyword("NULL"):
+		return nil, nil
+	}
+	return nil, syntaxError(t)
 }
 
 // syntaxError returns the error for a token that can't appear where it does.

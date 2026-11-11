@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 )
@@ -299,71 +298,185 @@ func TestSelectColumnRejectsUnknownTables(t *testing.T) {
 	}
 }
 
-func TestFormatValue(t *testing.T) {
+func TestSelectWhere(t *testing.T) {
 	tests := []struct {
-		value any
-		want  string
+		sql  string
+		want string
 	}{
-		{nil, ""},
-		{int64(0), "0"},
-		{int64(42), "42"},
-		{int64(-7), "-7"},
-		{int64(math.MaxInt64), "9223372036854775807"},
-		{int64(math.MinInt64), "-9223372036854775808"},
-		{1.5, "1.5"},
-		{2.0, "2.0"},
-		{"", ""},
-		{"Granny Smith", "Granny Smith"},
-		{[]byte("hello"), "hello"},
-		{[]byte{}, ""},
+		{"SELECT name, color FROM apples WHERE color = 'Yellow'", "Golden Delicious|Yellow\n"},
+		{"select name, color from apples where color = 'Red'", "Fuji|Red\n"},
+		{"SELECT name FROM apples WHERE color='Blush Red';", "Honeycrisp\n"},
+		// The column of the condition doesn't have to be selected.
+		{"SELECT id FROM apples WHERE name = 'Granny Smith'", "1\n"},
+		{"SELECT name FROM oranges WHERE description = 'usually seedless, great for snacking'", "Clementine\n"},
+		{`SELECT Name FROM Apples WHERE "COLOR" == 'Yellow'`, "Golden Delicious\n"},
+		// Text is compared exactly: the case and the spaces matter.
+		{"SELECT name FROM apples WHERE color = 'yellow'", ""},
+		{"SELECT name FROM apples WHERE color = 'Yellow '", ""},
+		{"SELECT name FROM apples WHERE color = 'Purple'", ""},
+		{"SELECT name FROM apples WHERE color = ''", ""},
+
+		{"SELECT name FROM apples WHERE color != 'Red'", "Granny Smith\nHoneycrisp\nGolden Delicious\n"},
+		{"SELECT name FROM apples WHERE color <> 'Red'", "Granny Smith\nHoneycrisp\nGolden Delicious\n"},
+		{"SELECT name FROM apples WHERE name < 'Golden Delicious'", "Fuji\n"},
+		{"SELECT name FROM apples WHERE name <= 'Golden Delicious'", "Fuji\nGolden Delicious\n"},
+		{"SELECT name FROM apples WHERE name > 'Golden Delicious'", "Granny Smith\nHoneycrisp\n"},
+		{"SELECT name FROM apples WHERE name >= 'Golden Delicious'", "Granny Smith\nHoneycrisp\nGolden Delicious\n"},
+
+		// The id column is an alias for the rowid.
+		{"SELECT name FROM apples WHERE id = 2", "Fuji\n"},
+		{"SELECT name FROM apples WHERE id = '2'", "Fuji\n"},
+		{"SELECT name FROM apples WHERE id = 2.0", "Fuji\n"},
+		{"SELECT name FROM apples WHERE id > 2", "Honeycrisp\nGolden Delicious\n"},
+		{"SELECT name FROM apples WHERE id <= 2", "Granny Smith\nFuji\n"},
+		{"SELECT name FROM apples WHERE id != 1", "Fuji\nHoneycrisp\nGolden Delicious\n"},
+		{"SELECT name FROM apples WHERE id < 1.5", "Granny Smith\n"},
+		{"SELECT name FROM apples WHERE id = -1", ""},
+		{"SELECT name FROM apples WHERE id = 'two'", ""},
+
+		// No value equals NULL, or differs from it.
+		{"SELECT name FROM apples WHERE color = NULL", ""},
+		{"SELECT name FROM apples WHERE color != NULL", ""},
+
+		{"SELECT COUNT(*) FROM apples WHERE color = 'Red'", "1\n"},
+		{"SELECT COUNT(*) FROM apples WHERE color != 'Red'", "3\n"},
+		{"SELECT COUNT(*) FROM apples WHERE color = 'Purple'", "0\n"},
+		{"select count(*) from oranges where id > 2", "4\n"},
 	}
 
 	for _, tt := range tests {
-		if got := formatValue(tt.value); got != tt.want {
-			t.Errorf("formatValue(%#v) = %q, want %q", tt.value, got, tt.want)
+		t.Run(tt.sql, func(t *testing.T) {
+			if got := runCommand(t, sampleDB, tt.sql); got != tt.want {
+				t.Errorf("output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSelectWhereReturnsEveryMatchingRow(t *testing.T) {
+	path := createDatabase(t, `
+		CREATE TABLE fruits (id integer primary key, name text, color text);
+		INSERT INTO fruits (name, color) VALUES
+			('banana', 'Yellow'), ('cherry', 'Red'), ('lemon', 'Yellow'), ('lime', 'Green'),
+			('pineapple', 'Yellow'), ('strawberry', 'Red'), ('blank', NULL);
+	`)
+
+	got := runCommand(t, path, "SELECT id, name FROM fruits WHERE color = 'Yellow'")
+
+	if want := "1|banana\n3|lemon\n5|pineapple\n"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+}
+
+// TestSelectWhereMatchesSQLite compares the rows that conditions select with
+// the rows that the sqlite3 command-line shell selects: SQLite's rules for
+// comparing values of different types are intricate.
+func TestSelectWhereMatchesSQLite(t *testing.T) {
+	path := createDatabase(t, `
+		CREATE TABLE items (
+			id INTEGER PRIMARY KEY,
+			name TEXT,
+			nocase TEXT COLLATE NOCASE,
+			rtrim TEXT COLLATE RTRIM,
+			qty INTEGER,
+			price REAL,
+			num NUMERIC,
+			anything
+		);
+		INSERT INTO items VALUES (1, 'apple', 'apple', 'apple', 10, 1.5, 3, 5);
+		INSERT INTO items VALUES (2, 'Apple', 'APPLE', 'apple   ', 5, 2, 3.5, '5');
+		INSERT INTO items VALUES (3, 'banana', 'Banana', ' apple', -3, 10.25, '7', 'text');
+		INSERT INTO items VALUES (4, '', '', '', 0, 0, 0, '');
+		INSERT INTO items VALUES (5, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+		INSERT INTO items VALUES (6, '10', '10', '10', '10', '10', '10', 1.25);
+		INSERT INTO items VALUES (7, 'cherry', 'CHERRY', 'cherry ', 'abc', 'abc', 'abc', x'6162');
+		INSERT INTO items VALUES (8, '5', 'b', 'b', 9007199254740993, 9007199254740992, 1e3, 5.0);
+		INSERT INTO items VALUES (9, '5.0', 'B', 'b  ', 100, -1.5, -2, -5);
+		INSERT INTO items VALUES (100, 'zebra', 'Zebra', 'zebra', 2147483648, 1e100, 12, 10);
+	`)
+
+	conditions := []string{
+		"name = 'apple'", "name = 'Apple'", "name != 'apple'", "name < 'b'", "name >= 'banana'",
+		"name = ''", "name > ''", "name = 5", "name = 5.0", "name = 10", "name < 5", "name > 5",
+		"name = NULL", "name <> NULL",
+
+		"nocase = 'APPLE'", "nocase = 'apple'", "nocase != 'Apple'", "nocase > 'b'", "nocase >= 'B'",
+		"nocase < 'c'", "nocase = 'cherry'", "nocase = 10",
+
+		"rtrim = 'apple'", "rtrim = 'apple     '", "rtrim != 'apple'", "rtrim = 'b'", "rtrim > 'b'",
+		"rtrim = ''", "rtrim = '    '", "rtrim = ' apple'",
+
+		"qty = 10", "qty = '10'", "qty = 10.0", "qty = '10.0'", "qty = ' 10 '", "qty = '1e1'",
+		"qty > 5", "qty >= 5", "qty < 5.5", "qty <= 0", "qty != 10", "qty = 'abc'", "qty > 'abc'",
+		"qty < 'abc'", "qty = -3", "qty = 0", "qty = 0.0", "qty = ''",
+		"qty = 9007199254740993", "qty = 9007199254740992", "qty = 9007199254740992.0",
+		"qty > 9007199254740992.0", "qty > 2147483647",
+
+		"price = 1.5", "price = '1.5'", "price > 1", "price = 2", "price = '2'", "price = 2.0",
+		"price <= 2.0", "price < 0", "price = 10", "price = '10'", "price = 'abc'", "price >= 1e100",
+		"price = 9007199254740992", "price = 9007199254740993", "price != 0",
+
+		"num = 3", "num = '3'", "num = 3.0", "num = 3.5", "num = '3.5'", "num = 7", "num = '7'",
+		"num = 1000", "num = '1e3'", "num > 5", "num < 0", "num = 'abc'", "num = 10",
+
+		"anything = 5", "anything = '5'", "anything = 5.0", "anything = 'text'", "anything = 1.25",
+		"anything > 1", "anything < 'u'", "anything >= ''", "anything = ''", "anything = -5",
+		"anything != 5", "anything > 'zzz'", "anything < 0", "anything = 10", "anything = '10'",
+
+		"id = 1", "id = '1'", "id = 1.0", "id = 1.5", "id > 2", "id >= 2", "id < 3.5", "id != 3",
+		"id = 'abc'", "id > 'abc'", "id < 'abc'", "id = -5", "id = 100", "id = '100'", "id <= 0",
+		"id = NULL",
+	}
+
+	for _, condition := range conditions {
+		t.Run(condition, func(t *testing.T) {
+			for _, sql := range []string{
+				"SELECT id, name FROM items WHERE " + condition,
+				"SELECT COUNT(*) FROM items WHERE " + condition,
+			} {
+				got := runCommand(t, path, sql)
+				if want := sqlite3Output(t, path, sql); got != want {
+					t.Errorf("%s\noutput = %q, sqlite3 prints %q", sql, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSelectWhereRejectsUnknownColumns(t *testing.T) {
+	for _, sql := range []string{
+		"SELECT name FROM apples WHERE flavor = 'sweet'",
+		"SELECT COUNT(*) FROM apples WHERE flavor = 'sweet'",
+	} {
+		err := runSQLError(t, sampleDB, sql)
+
+		if want := "no such column: flavor"; err.Error() != want {
+			t.Errorf("%s: error = %q, want %q", sql, err, want)
 		}
 	}
 }
 
-// TestFormatFloat checks formatFloat against the text that sqlite3 displays
-// for the same numbers.
-func TestFormatFloat(t *testing.T) {
-	tests := []struct {
-		value float64
-		want  string
-	}{
-		{1, "1.0"},
-		{0.1, "0.1"},
-		{-2.5, "-2.5"},
-		{0, "0.0"},
-		{math.Copysign(0, -1), "0.0"},
-		{100, "100.0"},
-		{0.1 + 0.2, "0.3"},
-		{1.0 / 3, "0.333333333333333"},
-		{2.0 / 3, "0.666666666666667"},
-		{math.Pi, "3.14159265358979"},
-		{123456789.123456789, "123456789.123457"},
-		{0.0001, "0.0001"},
-		// Exponents are used below 1e-4 and from 1e15 up.
-		{0.00001, "1.0e-05"},
-		{1.5e-7, "1.5e-07"},
-		{1e14, "100000000000000.0"},
-		{99999999999999.99, "100000000000000.0"},
-		{1e15, "1.0e+15"},
-		{999999999999999.9, "1.0e+15"},
-		{123456789012345678, "1.23456789012346e+17"},
-		{1e100, "1.0e+100"},
-		{-1e100, "-1.0e+100"},
-		{math.MaxFloat64, "1.79769313486232e+308"},
-		{math.SmallestNonzeroFloat64, "4.94065645841247e-324"},
-		{math.Inf(1), "Inf"},
-		{math.Inf(-1), "-Inf"},
+func TestSelectWhereRejectsUnknownCollations(t *testing.T) {
+	// The definition of a table can name a collating sequence that an
+	// application registered with SQLite, which the sqlite3 shell doesn't
+	// know either. Build the database by hand, since sqlite3 refuses to
+	// create such a table.
+	data := buildDatabase(512,
+		testPage{pageType: pageTypeLeafTable, cells: [][]byte{
+			encodeTableLeafCell(1, "table", "words", "words", 2, "CREATE TABLE words (word TEXT COLLATE german)"),
+		}},
+		testPage{pageType: pageTypeLeafTable, cells: [][]byte{encodeTableLeafCell(1, "Straße")}},
+	)
+	path := writeDatabaseFile(t, data)
+
+	// The collating sequence only matters for comparisons.
+	if got, want := runCommand(t, path, "SELECT word FROM words"), "Straße\n"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
 	}
 
-	for _, tt := range tests {
-		if got := formatFloat(tt.value); got != tt.want {
-			t.Errorf("formatFloat(%v) = %q, want %q", tt.value, got, tt.want)
-		}
+	err := runSQLError(t, path, "SELECT word FROM words WHERE word = 'Strasse'")
+	if want := "no such collation sequence: GERMAN"; err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
 	}
 }
 
@@ -375,6 +488,8 @@ func TestSQLSyntaxErrors(t *testing.T) {
 		"SELECT COUNT(*) apples",
 		"DROP TABLE apples",
 		"SELECT COUNT(*) FROM 'apples",
+		"SELECT name FROM apples WHERE",
+		"SELECT name FROM apples WHERE color = 'Yellow' OR color = 'Red'",
 	} {
 		t.Run(sql, func(t *testing.T) {
 			runSQLError(t, sampleDB, sql)
