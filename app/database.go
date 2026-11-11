@@ -8,39 +8,32 @@ import (
 	"io"
 )
 
-// headerSize is the size in bytes of the database header that every SQLite
-// database file starts with.
-const headerSize = 100
+// databaseHeaderSize is the size in bytes of the database header that every
+// SQLite database file starts with.
+const databaseHeaderSize = 100
 
-// headerMagic is the string every SQLite database file starts with.
-var headerMagic = []byte("SQLite format 3\x00")
-
-// schemaPageNumber is the number of the page that holds the sqlite_schema
-// table. Page numbers start at 1.
-const schemaPageNumber = 1
-
-// The types of b-tree pages, as stored in the first byte of a page header.
-const (
-	pageTypeInteriorIndex = 0x02
-	pageTypeInteriorTable = 0x05
-	pageTypeLeafIndex     = 0x0a
-	pageTypeLeafTable     = 0x0d
-)
+// databaseHeaderMagic is the string every SQLite database file starts with.
+var databaseHeaderMagic = []byte("SQLite format 3\x00")
 
 // database provides access to the pages of a SQLite database file.
 type database struct {
-	file     io.ReaderAt
+	file io.ReaderAt
+	// pageSize is the size in bytes of every page of the database.
 	pageSize int
+	// usableSize is the number of bytes at the start of every page that are
+	// available to SQLite. It is smaller than the page size when the database
+	// reserves space at the end of every page for extensions.
+	usableSize int
 }
 
 // newDatabase reads the database header from file and returns a database
 // that reads its pages from file.
 func newDatabase(file io.ReaderAt) (*database, error) {
-	header := make([]byte, headerSize)
+	header := make([]byte, databaseHeaderSize)
 	if err := readFullAt(file, header, 0); err != nil {
 		return nil, fmt.Errorf("failed to read database header: %w", err)
 	}
-	if !bytes.HasPrefix(header, headerMagic) {
+	if !bytes.HasPrefix(header, databaseHeaderMagic) {
 		return nil, errors.New("file is not a SQLite database: bad magic string")
 	}
 
@@ -55,23 +48,18 @@ func newDatabase(file io.ReaderAt) (*database, error) {
 		return nil, fmt.Errorf("invalid database page size %d", pageSize)
 	}
 
-	return &database{file: file, pageSize: pageSize}, nil
+	// Byte 20 holds the number of bytes reserved at the end of every page.
+	// SQLite requires a usable size of at least 480 bytes.
+	usableSize := pageSize - int(header[20])
+	if usableSize < 480 {
+		return nil, fmt.Errorf("invalid usable page size %d", usableSize)
+	}
+
+	return &database{file: file, pageSize: pageSize, usableSize: usableSize}, nil
 }
 
-// page is a b-tree page of a database.
-type page struct {
-	// number is the page's number. Page numbers start at 1.
-	number int
-	// data holds the bytes of the whole page. For page 1, that includes the
-	// database header.
-	data []byte
-	// pageType is one of the pageType constants.
-	pageType byte
-	// cellCount is the number of cells stored on the page.
-	cellCount int
-}
-
-// readPage reads the b-tree page with the given number.
+// readPage reads the b-tree page with the given number. Page numbers start
+// at 1.
 func (db *database) readPage(number int) (*page, error) {
 	if number < 1 {
 		return nil, fmt.Errorf("invalid page number %d", number)
@@ -82,29 +70,7 @@ func (db *database) readPage(number int) (*page, error) {
 	if err := readFullAt(db.file, data, offset); err != nil {
 		return nil, fmt.Errorf("failed to read page %d: %w", number, err)
 	}
-
-	// The b-tree page header is at the start of the page, except on page 1
-	// where the database header comes first.
-	header := data
-	if number == 1 {
-		header = data[headerSize:]
-	}
-
-	p := &page{
-		number:   number,
-		data:     data,
-		pageType: header[0],
-		// The cell count is a 2-byte big-endian integer at offset 3 of the
-		// page header.
-		cellCount: int(binary.BigEndian.Uint16(header[3:5])),
-	}
-
-	switch p.pageType {
-	case pageTypeInteriorIndex, pageTypeInteriorTable, pageTypeLeafIndex, pageTypeLeafTable:
-		return p, nil
-	default:
-		return nil, fmt.Errorf("page %d is not a b-tree page: unknown page type 0x%02x", number, p.pageType)
-	}
+	return newPage(number, data[:db.usableSize])
 }
 
 // readFullAt reads exactly len(buf) bytes from r starting at offset.

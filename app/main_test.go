@@ -35,6 +35,25 @@ func TestDBInfoCountsTables(t *testing.T) {
 	}
 }
 
+func TestDBInfoCountsOnlyTables(t *testing.T) {
+	// Like sqlite3, count the internal sqlite_sequence table that
+	// AUTOINCREMENT creates, but not the indexes, views and triggers.
+	path := createDatabase(t, `
+		CREATE TABLE apples (id integer primary key autoincrement, name text unique);
+		CREATE TABLE oranges (id integer primary key, name text);
+		CREATE INDEX idx_oranges_name ON oranges (name);
+		CREATE VIEW orange_names AS SELECT name FROM oranges;
+		CREATE TRIGGER oranges_insert AFTER INSERT ON oranges BEGIN SELECT 1; END;
+	`)
+
+	got := runCommand(t, path, ".dbinfo")
+
+	want := "database page size: 4096\nnumber of tables: 3\n"
+	if got != want {
+		t.Errorf(".dbinfo output = %q, want %q", got, want)
+	}
+}
+
 func TestDBInfoSupportsEveryPageSize(t *testing.T) {
 	for _, pageSize := range []int{512, 1024, 2048, 4096, 8192, 16384, 32768, 65536} {
 		t.Run(fmt.Sprint(pageSize), func(t *testing.T) {
@@ -51,6 +70,90 @@ func TestDBInfoSupportsEveryPageSize(t *testing.T) {
 				t.Errorf(".dbinfo output = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestTables(t *testing.T) {
+	// The sample database also contains the internal sqlite_sequence table,
+	// which isn't listed.
+	got := runCommand(t, sampleDB, ".tables")
+
+	if want := "apples oranges\n"; got != want {
+		t.Errorf(".tables output = %q, want %q", got, want)
+	}
+}
+
+func TestTablesSortsNames(t *testing.T) {
+	path := createDatabase(t, `
+		CREATE TABLE pears (id integer primary key, name text);
+		CREATE TABLE apples (id integer primary key, name text);
+		CREATE TABLE Zucchinis (id integer primary key, name text);
+		CREATE TABLE oranges (id integer primary key, name text);
+		CREATE TABLE bananas (id integer primary key, name text);
+	`)
+
+	got := runCommand(t, path, ".tables")
+
+	// Like sqlite3, compare the names byte by byte: uppercase letters sort
+	// before lowercase ones.
+	if want := "Zucchinis apples bananas oranges pears\n"; got != want {
+		t.Errorf(".tables output = %q, want %q", got, want)
+	}
+}
+
+func TestTablesListsOnlyTablesAndViews(t *testing.T) {
+	path := createDatabase(t, `
+		CREATE TABLE oranges (id integer primary key autoincrement, name text unique);
+		CREATE INDEX idx_oranges_name ON oranges (name);
+		CREATE VIEW apple_names AS SELECT name FROM oranges;
+		CREATE TRIGGER oranges_insert AFTER INSERT ON oranges BEGIN SELECT 1; END;
+		CREATE TABLE melons (id integer primary key, name text);
+		ANALYZE;
+	`)
+
+	got := runCommand(t, path, ".tables")
+
+	if want := "apple_names melons oranges\n"; got != want {
+		t.Errorf(".tables output = %q, want %q", got, want)
+	}
+}
+
+func TestTablesOfSingleTableDatabase(t *testing.T) {
+	path := createDatabase(t, "CREATE TABLE grapes (id integer primary key, name text);")
+
+	got := runCommand(t, path, ".tables")
+
+	if want := "grapes\n"; got != want {
+		t.Errorf(".tables output = %q, want %q", got, want)
+	}
+}
+
+func TestTablesOfDatabaseWithoutTables(t *testing.T) {
+	path := createDatabase(t, `
+		CREATE TABLE grapes (id integer primary key, name text);
+		DROP TABLE grapes;
+	`)
+
+	if got := runCommand(t, path, ".tables"); got != "" {
+		t.Errorf(".tables output = %q, want no output", got)
+	}
+}
+
+func TestTablesWithManyTables(t *testing.T) {
+	// 30 tables still fit on the single sqlite_schema page.
+	var sql strings.Builder
+	var names []string
+	for i := 0; i < 30; i++ {
+		name := fmt.Sprintf("table_%02d", i)
+		names = append(names, name)
+		fmt.Fprintf(&sql, "CREATE TABLE %s (id integer primary key, name text);\n", name)
+	}
+	path := createDatabase(t, sql.String())
+
+	got := runCommand(t, path, ".tables")
+
+	if want := strings.Join(names, " ") + "\n"; got != want {
+		t.Errorf(".tables output = %q, want %q", got, want)
 	}
 }
 
@@ -73,5 +176,12 @@ func TestRunReportsMissingDatabaseFile(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := run("does-not-exist.db", ".dbinfo", &stdout); err == nil {
 		t.Fatal("run with a missing database file returned no error")
+	}
+}
+
+func TestRunRejectsFilesThatAreNotDatabases(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := run("main.go", ".tables", &stdout); err == nil {
+		t.Fatal("run with a file that isn't a database returned no error")
 	}
 }

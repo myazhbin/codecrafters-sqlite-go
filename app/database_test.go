@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"os"
 	"testing"
 )
 
@@ -32,6 +31,9 @@ func TestNewDatabaseReadsPageSize(t *testing.T) {
 			if db.pageSize != tt.want {
 				t.Errorf("pageSize = %d, want %d", db.pageSize, tt.want)
 			}
+			if db.usableSize != tt.want {
+				t.Errorf("usableSize = %d, want %d", db.usableSize, tt.want)
+			}
 		})
 	}
 }
@@ -49,6 +51,19 @@ func TestNewDatabaseReadsPageSizeAsBigEndian(t *testing.T) {
 	}
 }
 
+func TestNewDatabaseReadsReservedSpace(t *testing.T) {
+	header := newHeader(4096)
+	header[20] = 16 // The number of bytes reserved at the end of every page.
+
+	db, err := newDatabase(bytes.NewReader(header))
+	if err != nil {
+		t.Fatalf("newDatabase returned an error: %v", err)
+	}
+	if db.pageSize != 4096 || db.usableSize != 4080 {
+		t.Errorf("pageSize, usableSize = %d, %d, want 4096, 4080", db.pageSize, db.usableSize)
+	}
+}
+
 func TestNewDatabaseRejectsInvalidPageSize(t *testing.T) {
 	for _, raw := range []uint16{0, 2, 256, 1000, 4097} {
 		if _, err := newDatabase(bytes.NewReader(newHeader(raw))); err == nil {
@@ -57,8 +72,18 @@ func TestNewDatabaseRejectsInvalidPageSize(t *testing.T) {
 	}
 }
 
+func TestNewDatabaseRejectsTooMuchReservedSpace(t *testing.T) {
+	// The usable size of a page must be at least 480 bytes.
+	header := newHeader(512)
+	header[20] = 33
+
+	if _, err := newDatabase(bytes.NewReader(header)); err == nil {
+		t.Fatal("newDatabase with a usable page size of 479 bytes returned no error")
+	}
+}
+
 func TestNewDatabaseRejectsTruncatedHeader(t *testing.T) {
-	truncated := newHeader(4096)[:headerSize-1]
+	truncated := newHeader(4096)[:databaseHeaderSize-1]
 
 	if _, err := newDatabase(bytes.NewReader(truncated)); err == nil {
 		t.Fatal("newDatabase with a truncated header returned no error")
@@ -83,21 +108,19 @@ func TestReadPage(t *testing.T) {
 		testPage{pageType: pageTypeLeafIndex, cellCount: 0x0102},
 		testPage{pageType: pageTypeInteriorIndex, cellCount: 0},
 	)
-	db, err := newDatabase(bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("newDatabase returned an error: %v", err)
-	}
+	db := newTestDatabase(t, data)
 
 	tests := []struct {
 		number        int
 		wantPageType  byte
 		wantCellCount int
+		wantLeaf      bool
 	}{
-		{number: 1, wantPageType: pageTypeLeafTable, wantCellCount: 3},
-		{number: 2, wantPageType: pageTypeInteriorTable, wantCellCount: 7},
+		{number: 1, wantPageType: pageTypeLeafTable, wantCellCount: 3, wantLeaf: true},
+		{number: 2, wantPageType: pageTypeInteriorTable, wantCellCount: 7, wantLeaf: false},
 		// The cell count is big-endian: 0x0102 is 258.
-		{number: 3, wantPageType: pageTypeLeafIndex, wantCellCount: 258},
-		{number: 4, wantPageType: pageTypeInteriorIndex, wantCellCount: 0},
+		{number: 3, wantPageType: pageTypeLeafIndex, wantCellCount: 258, wantLeaf: true},
+		{number: 4, wantPageType: pageTypeInteriorIndex, wantCellCount: 0, wantLeaf: false},
 	}
 
 	for _, tt := range tests {
@@ -115,6 +138,9 @@ func TestReadPage(t *testing.T) {
 		if p.cellCount != tt.wantCellCount {
 			t.Errorf("readPage(%d).cellCount = %d, want %d", tt.number, p.cellCount, tt.wantCellCount)
 		}
+		if p.isLeaf() != tt.wantLeaf {
+			t.Errorf("readPage(%d).isLeaf() = %t, want %t", tt.number, p.isLeaf(), tt.wantLeaf)
+		}
 		if len(p.data) != 512 {
 			t.Errorf("readPage(%d) returned %d bytes of data, want 512", tt.number, len(p.data))
 		}
@@ -126,10 +152,7 @@ func TestReadPageRejectsInvalidPages(t *testing.T) {
 		testPage{pageType: pageTypeLeafTable},
 		testPage{pageType: 0x07}, // Not a b-tree page type.
 	)
-	db, err := newDatabase(bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("newDatabase returned an error: %v", err)
-	}
+	db := newTestDatabase(t, data)
 
 	tests := []struct {
 		name   string
@@ -152,10 +175,7 @@ func TestReadPageRejectsInvalidPages(t *testing.T) {
 
 func TestReadPageRejectsTruncatedPage(t *testing.T) {
 	data := buildDatabase(512, testPage{pageType: pageTypeLeafTable})
-	db, err := newDatabase(bytes.NewReader(data[:len(data)-1]))
-	if err != nil {
-		t.Fatalf("newDatabase returned an error: %v", err)
-	}
+	db := newTestDatabase(t, data[:len(data)-1])
 
 	if _, err := db.readPage(1); err == nil {
 		t.Fatal("readPage of a truncated page returned no error")
@@ -163,16 +183,7 @@ func TestReadPageRejectsTruncatedPage(t *testing.T) {
 }
 
 func TestReadPageOfSampleDatabase(t *testing.T) {
-	file, err := os.Open(sampleDB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-
-	db, err := newDatabase(file)
-	if err != nil {
-		t.Fatalf("newDatabase returned an error: %v", err)
-	}
+	db := openDatabase(t, sampleDB)
 
 	// Each table of the sample database fits on a single leaf page, so a
 	// page's cell count is the number of rows in its table.
