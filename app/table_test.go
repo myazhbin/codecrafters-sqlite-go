@@ -369,3 +369,155 @@ func TestCountRowsOfTable(t *testing.T) {
 		}
 	}
 }
+
+func TestFindTableFindsIndexes(t *testing.T) {
+	path := createDatabase(t, `
+		CREATE TABLE fruits (id INTEGER PRIMARY KEY, name TEXT UNIQUE, color TEXT, price REAL);
+		CREATE TABLE vegetables (id INTEGER PRIMARY KEY, name TEXT, color TEXT);
+		CREATE INDEX idx_fruits_color ON fruits (color);
+		CREATE INDEX idx_vegetables_name ON vegetables (name);
+		CREATE UNIQUE INDEX idx_fruits_price ON fruits (price DESC, name COLLATE NOCASE);
+		CREATE INDEX idx_fruits_lower ON fruits (lower(name));
+		CREATE INDEX idx_fruits_red ON fruits (name) WHERE color = 'Red';
+	`)
+	db := openDatabase(t, path)
+
+	fruits, err := db.findTable("FRUITS")
+	if err != nil {
+		t.Fatalf("findTable returned an error: %v", err)
+	}
+	// The index that SQLite created for the UNIQUE constraint has no
+	// definition, and the partial index doesn't cover every row.
+	want := []index{
+		{name: "idx_fruits_color", rootPage: 5, columns: []indexedColumn{{name: "color"}}},
+		{
+			name: "idx_fruits_price", rootPage: 7,
+			columns: []indexedColumn{{name: "price", descending: true}, {name: "name", collation: "NOCASE"}},
+		},
+		{name: "idx_fruits_lower", rootPage: 8, columns: []indexedColumn{{}}},
+	}
+	if !reflect.DeepEqual(fruits.indexes, want) {
+		t.Errorf("indexes of fruits = %+v, want %+v", fruits.indexes, want)
+	}
+
+	vegetables, err := db.findTable("vegetables")
+	if err != nil {
+		t.Fatalf("findTable returned an error: %v", err)
+	}
+	want = []index{{name: "idx_vegetables_name", rootPage: 6, columns: []indexedColumn{{name: "name"}}}}
+	if !reflect.DeepEqual(vegetables.indexes, want) {
+		t.Errorf("indexes of vegetables = %+v, want %+v", vegetables.indexes, want)
+	}
+}
+
+func TestFindTableSkipsIndexesWithInvalidDefinitions(t *testing.T) {
+	data := buildDatabase(1024, testPage{pageType: pageTypeLeafTable, cells: [][]byte{
+		encodeTableLeafCell(1, "table", "fruits", "fruits", 2, "CREATE TABLE fruits (name TEXT, color TEXT)"),
+		encodeTableLeafCell(2, "index", "broken", "fruits", 3, "CREATE INDEX broken ON fruits (name"),
+		encodeTableLeafCell(3, "index", "sqlite_autoindex_fruits_1", "fruits", 4, nil),
+		encodeTableLeafCell(4, "index", "idx_color", "Fruits", 5, "CREATE INDEX idx_color ON Fruits (color)"),
+		encodeTableLeafCell(5, "index", "idx_other", "others", 6, "CREATE INDEX idx_other ON others (name)"),
+	}})
+
+	table, err := newTestDatabase(t, data).findTable("fruits")
+	if err != nil {
+		t.Fatalf("findTable returned an error: %v", err)
+	}
+
+	want := []index{{name: "idx_color", rootPage: 5, columns: []indexedColumn{{name: "color"}}}}
+	if !reflect.DeepEqual(table.indexes, want) {
+		t.Errorf("indexes = %+v, want %+v", table.indexes, want)
+	}
+}
+
+func TestTableFindIndex(t *testing.T) {
+	fruits := &table{
+		name: "fruits",
+		columns: []columnDefinition{
+			{name: "id", declaredType: "INTEGER"},
+			{name: "name", declaredType: "TEXT"},
+			{name: "color", declaredType: "TEXT"},
+			{name: "nickname", declaredType: "TEXT", collation: "NOCASE"},
+			{name: "price", declaredType: "REAL"},
+			{name: "origin", declaredType: "TEXT"},
+			{name: "stock", declaredType: "INTEGER"},
+		},
+		rowIDColumn: 0,
+		indexes: []index{
+			{name: "idx_expression", columns: []indexedColumn{{}}},
+			{name: "idx_price_descending", columns: []indexedColumn{{name: "price", descending: true}}},
+			{name: "idx_name_nocase", columns: []indexedColumn{{name: "name", collation: "NOCASE"}}},
+			{name: "idx_name", columns: []indexedColumn{{name: "NAME"}, {name: "color"}}},
+			{name: "idx_name_again", columns: []indexedColumn{{name: "name"}}},
+			{name: "idx_color_binary", columns: []indexedColumn{{name: "color", collation: "BINARY"}}},
+			{name: "idx_nickname", columns: []indexedColumn{{name: "nickname"}}},
+			{name: "idx_origin_rtrim", columns: []indexedColumn{{name: "origin", collation: "RTRIM"}}},
+			{name: "idx_stock_color", columns: []indexedColumn{{name: "stock"}, {name: "color", descending: true}}},
+		},
+	}
+
+	tests := []struct {
+		name      string
+		column    string
+		collation string
+		want      string // The name of the index, or "" for no index.
+	}{
+		// The first index whose first column is the column is used, as long
+		// as it is ordered by the collating sequence of the comparison.
+		{"first of several indexes", "name", collationBinary, "idx_name"},
+		{"index with another collating sequence", "name", collationNoCase, "idx_name_nocase"},
+		{"index that names the collating sequence", "color", collationBinary, "idx_color_binary"},
+		// An index that doesn't name a collating sequence uses the one of
+		// its column.
+		{"index that uses the collating sequence of its column", "nickname", collationNoCase, "idx_nickname"},
+		{"index with other columns after the first", "stock", collationBinary, "idx_stock_color"},
+
+		{"index with only another collating sequence", "origin", collationBinary, ""},
+		{"index in descending order", "price", collationBinary, ""},
+		{"column without an index", "id", collationBinary, ""},
+		// The color column is the second column of idx_name, which isn't
+		// ordered by color.
+		{"second column of an index", "color", collationNoCase, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			column, err := fruits.columnIndex(tt.column)
+			if err != nil {
+				t.Fatalf("columnIndex returned an error: %v", err)
+			}
+
+			got := ""
+			if index := fruits.findIndex(column, tt.collation); index != nil {
+				got = index.name
+			}
+			if got != tt.want {
+				t.Errorf("findIndex(%s, %s) = %q, want %q", tt.column, tt.collation, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindRow(t *testing.T) {
+	db := openDatabase(t, sampleDB)
+	apples, err := db.findTable("apples")
+	if err != nil {
+		t.Fatalf("findTable returned an error: %v", err)
+	}
+
+	r, err := db.findRow(apples, 3)
+	if err != nil {
+		t.Fatalf("findRow returned an error: %v", err)
+	}
+	got := []any{r.value(0), r.value(1), r.value(2)}
+	if want := []any{int64(3), "Honeycrisp", "Blush Red"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("findRow(3) = %#v, want %#v", got, want)
+	}
+
+	// An index never points to a row that doesn't exist.
+	for _, rowID := range []int64{0, 5, -1} {
+		if r, err := db.findRow(apples, rowID); err == nil {
+			t.Errorf("findRow(%d) = %+v, want an error", rowID, r)
+		}
+	}
+}

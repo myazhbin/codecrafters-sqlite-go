@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -240,6 +241,251 @@ func TestSelectFromSuperheroesMatchesSQLite(t *testing.T) {
 			if want := sqlite3Output(t, superheroesDB, sql); got != want {
 				t.Errorf("output differs from the output of sqlite3:\n got %d bytes: %.200q\nwant %d bytes: %.200q",
 					len(got), got, len(want), want)
+			}
+		})
+	}
+}
+
+// companiesDB is the database of companies that download_sample_databases.sh
+// downloads. Its companies table has an index on its country column.
+const companiesDB = "../companies.db"
+
+func TestSelectFromCompanies(t *testing.T) {
+	requireFile(t, companiesDB)
+
+	tests := []struct {
+		sql  string
+		want string
+	}{
+		{
+			"SELECT id, name FROM companies WHERE country = 'eritrea'",
+			"121311|unilink s.c.\n" +
+				"2102438|orange asmara it solutions\n" +
+				"5729848|zara mining share company\n" +
+				"6634629|asmara rental\n",
+		},
+		{"SELECT COUNT(*) FROM companies WHERE country = 'eritrea'", "4\n"},
+		{"select count(*) from companies", "55991\n"},
+		{"SELECT name FROM companies WHERE id = 121311", "unilink s.c.\n"},
+		{"SELECT id FROM companies WHERE country = 'atlantis'", ""},
+		// The index is ordered by exact values.
+		{"SELECT id FROM companies WHERE country = 'Eritrea'", ""},
+		{"SELECT COUNT(*) FROM companies WHERE country = NULL", "0\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			if got := runCommand(t, companiesDB, tt.sql); got != tt.want {
+				t.Errorf("output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSelectFromCompaniesMatchesSQLite compares the output of queries that
+// can be answered with the index on the country column with the output of the
+// sqlite3 command-line shell.
+func TestSelectFromCompaniesMatchesSQLite(t *testing.T) {
+	requireFile(t, companiesDB)
+
+	countries := []string{
+		"eritrea", "tonga", "micronesia", "north korea", "chad", "montserrat", "myanmar", "tuvalu",
+		"republic of the congo", "dominican republic", "aruba", "zimbabwe", "", "no such country",
+	}
+	for _, country := range countries {
+		t.Run(country, func(t *testing.T) {
+			for _, sql := range []string{
+				fmt.Sprintf("SELECT id, name FROM companies WHERE country = '%s'", country),
+				fmt.Sprintf(`SELECT name, domain, "size range", locality, id FROM companies WHERE country = '%s'`, country),
+				fmt.Sprintf("SELECT COUNT(*) FROM companies WHERE country = '%s'", country),
+			} {
+				got := runCommand(t, companiesDB, sql)
+				if want := sqlite3Output(t, companiesDB, sql); got != want {
+					t.Errorf("%s\noutput differs from the output of sqlite3:\n got %d bytes: %.200q\nwant %d bytes: %.200q",
+						sql, len(got), got, len(want), want)
+				}
+			}
+		})
+	}
+}
+
+// TestSelectUsesIndex checks that a query that an index can answer reads the
+// few pages that lead to the rows it selects, rather than the whole table.
+func TestSelectUsesIndex(t *testing.T) {
+	requireFile(t, companiesDB)
+
+	file, err := os.Open(companiesDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		sql      string
+		wantRows int
+		// maxReads is the largest number of pages that the query may read.
+		maxReads int
+	}{
+		// Finding the rowids in the index takes reading a page per level of
+		// the index, and each row takes a page per level of the table. Both
+		// b-trees have three levels.
+		{"SELECT id, name FROM companies WHERE country = 'eritrea'", 4, 25},
+		{"SELECT id, name FROM companies WHERE country = 'atlantis'", 0, 10},
+		// Counting the rows doesn't take reading them.
+		{"SELECT COUNT(*) FROM companies WHERE country = 'myanmar'", 1, 15},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			reader := &countingReader{file: file}
+			db, err := newDatabase(reader)
+			if err != nil {
+				t.Fatalf("newDatabase returned an error: %v", err)
+			}
+			pageCount := int(info.Size()) / db.pageSize
+
+			var stdout bytes.Buffer
+			if err := executeSQL(db, tt.sql, &stdout); err != nil {
+				t.Fatalf("executeSQL returned an error: %v", err)
+			}
+
+			if got := strings.Count(stdout.String(), "\n"); got != tt.wantRows {
+				t.Errorf("the query printed %d rows, want %d", got, tt.wantRows)
+			}
+			if reader.reads > tt.maxReads {
+				t.Errorf("the query read %d of the %d pages of the database, want at most %d",
+					reader.reads, pageCount, tt.maxReads)
+			}
+		})
+	}
+}
+
+// TestSelectWithIndexesMatchesSQLite compares the output of queries on tables
+// with all sorts of indexes with the output of the sqlite3 command-line
+// shell. Whether a query is answered with an index or by scanning the table,
+// it must select the same rows.
+func TestSelectWithIndexesMatchesSQLite(t *testing.T) {
+	path := createDatabase(t, `
+		PRAGMA page_size = 512;
+		CREATE TABLE items (
+			id INTEGER PRIMARY KEY,
+			name TEXT,
+			nocase TEXT COLLATE NOCASE,
+			category TEXT,
+			qty INTEGER,
+			price REAL,
+			anything,
+			descending TEXT,
+			partial TEXT,
+			code TEXT UNIQUE
+		);
+		WITH RECURSIVE numbers (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 4000)
+		INSERT INTO items
+		SELECT
+			n * 2,
+			'name ' || (n % 50),
+			CASE n % 3 WHEN 0 THEN 'Word ' ELSE 'WORD ' END || (n % 40),
+			CASE WHEN n % 11 = 0 THEN NULL ELSE 'category ' || (n % 9) END,
+			n % 25,
+			(n % 8) / 2.0,
+			CASE n % 4 WHEN 0 THEN n % 6 WHEN 1 THEN 'text ' || (n % 6) WHEN 2 THEN (n % 6) + 0.5 ELSE NULL END,
+			'desc ' || (n % 30),
+			'part ' || (n % 20),
+			'code ' || n
+		FROM numbers;
+		CREATE INDEX idx_name ON items (name);
+		CREATE INDEX idx_nocase ON items (nocase);
+		CREATE INDEX idx_category_qty ON items (category, qty);
+		CREATE INDEX idx_qty ON items (qty);
+		CREATE INDEX idx_price ON items (price);
+		CREATE INDEX idx_anything ON items (anything);
+		CREATE INDEX idx_descending ON items (descending DESC);
+		CREATE INDEX idx_partial ON items (partial) WHERE qty > 10;
+		CREATE INDEX idx_lower ON items (lower(code));
+		DELETE FROM items WHERE id % 14 = 0;
+	`)
+
+	conditions := []string{
+		"name = 'name 7'", "name = 'name 49'", "name = 'name 50'", "name = 'NAME 7'", "name = ''", "name = 7",
+		"name = NULL", "name != 'name 7'", "name > 'name 48'",
+
+		"nocase = 'word 5'", "nocase = 'WORD 5'", "nocase = 'Word 39'", "nocase = 'word 40'", "nocase > 'word 8'",
+
+		"category = 'category 3'", "category = 'category 9'", "category = NULL", "category = 'Category 3'",
+
+		"qty = 7", "qty = '7'", "qty = 7.0", "qty = ' 7 '", "qty = 7.5", "qty = 25", "qty = -1", "qty = 'seven'",
+		"qty = 0", "qty < 2", "qty >= 23",
+
+		"price = 1.5", "price = '1.5'", "price = 2", "price = '2'", "price = 2.0", "price = 0", "price = 4",
+		"price = 3.25", "price = 'two'",
+
+		"anything = 3", "anything = '3'", "anything = 3.0", "anything = 3.5", "anything = 'text 3'",
+		"anything = 'text 6'", "anything = 6", "anything = NULL", "anything = ''",
+
+		"descending = 'desc 12'", "descending = 'desc 30'",
+		"partial = 'part 5'", "partial = 'part 20'",
+		"code = 'code 1234'", "code = 'code 4001'", "code = 'CODE 1234'",
+		"id = 2468", "id = '2468'", "id = 2467", "id = 28",
+	}
+
+	for _, condition := range conditions {
+		t.Run(condition, func(t *testing.T) {
+			for _, sql := range []string{
+				"SELECT id, name, nocase, category, qty, price, anything, code FROM items WHERE " + condition,
+				"SELECT COUNT(*) FROM items WHERE " + condition,
+			} {
+				got := runCommand(t, path, sql)
+				want := sqlite3Output(t, path, sql)
+				if !strings.Contains(condition, " = ") {
+					// The order of the rows of a query isn't defined. SQLite
+					// also uses indexes for the other comparisons, which
+					// returns the rows in the order of the index rather than
+					// in the order of the table.
+					got, want = sortLines(got), sortLines(want)
+				}
+				if got != want {
+					t.Errorf("%s\noutput differs from the output of sqlite3:\n got %d bytes: %.200q\nwant %d bytes: %.200q",
+						sql, len(got), got, len(want), want)
+				}
+			}
+		})
+	}
+}
+
+// sortLines returns text with its lines in sorted order.
+func sortLines(text string) string {
+	lines := strings.SplitAfter(text, "\n")
+	sort.Strings(lines)
+	return strings.Join(lines, "")
+}
+
+func TestSelectWithIndexOnEveryPageSize(t *testing.T) {
+	for _, pageSize := range []int{512, 1024, 4096, 16384, 65536} {
+		t.Run(fmt.Sprint(pageSize), func(t *testing.T) {
+			path := createDatabase(t, fmt.Sprintf(`
+				PRAGMA page_size = %d;
+				CREATE TABLE companies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, country TEXT);
+				WITH RECURSIVE numbers (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 30000)
+				INSERT INTO companies (name, country)
+				SELECT 'company ' || n, 'country ' || ((n * 7919) %% 300) FROM numbers;
+				CREATE INDEX idx_companies_country ON companies (country);
+			`, pageSize))
+
+			for _, sql := range []string{
+				"SELECT id, name FROM companies WHERE country = 'country 42'",
+				"SELECT id, name FROM companies WHERE country = 'country 299'",
+				"SELECT id, name FROM companies WHERE country = 'country 300'",
+				"SELECT COUNT(*) FROM companies WHERE country = 'country 0'",
+			} {
+				got := runCommand(t, path, sql)
+				if want := sqlite3Output(t, path, sql); got != want {
+					t.Errorf("%s\noutput differs from the output of sqlite3:\n got %d bytes: %.200q\nwant %d bytes: %.200q",
+						sql, len(got), got, len(want), want)
+				}
 			}
 		})
 	}

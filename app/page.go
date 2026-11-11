@@ -172,15 +172,74 @@ func (p *page) tableLeafCell(index int) (tableLeafCell, error) {
 	}
 	data = data[n:]
 
-	// A payload that is too large to fit on the page spills over to overflow
-	// pages. On table leaf pages, that happens when the payload takes up more
-	// than the usable size of the page minus 35 bytes.
-	if payloadSize < 0 || payloadSize > int64(len(p.data)-35) {
-		return tableLeafCell{}, fmt.Errorf("page %d, cell %d: payloads stored on overflow pages are not supported", p.number, index)
+	// On table leaf pages, a payload spills over to overflow pages when it
+	// takes up more than the usable size of the page minus 35 bytes.
+	payload, err := p.localPayload(index, data, payloadSize, len(p.data)-35)
+	if err != nil {
+		return tableLeafCell{}, err
 	}
-	if payloadSize > int64(len(data)) {
-		return tableLeafCell{}, fmt.Errorf("page %d is corrupt: the payload of cell %d is out of bounds", p.number, index)
+	return tableLeafCell{rowID: rowID, payload: payload}, nil
+}
+
+// indexCell is a cell of a page of an index b-tree. It stores one entry of
+// the index.
+type indexCell struct {
+	// leftChild is the number of the child page with the entries that sort
+	// between the entry of the previous cell and the entry of this cell. It
+	// is 0 on leaf pages, whose cells have no child pages.
+	leftChild int
+	// payload is the record of the entry. Its values are the indexed columns
+	// of a row, followed by the rowid of that row.
+	payload []byte
+}
+
+// indexCell parses the cell with the given index of a page of an index
+// b-tree.
+func (p *page) indexCell(index int) (indexCell, error) {
+	if p.pageType != pageTypeLeafIndex && p.pageType != pageTypeInteriorIndex {
+		return indexCell{}, fmt.Errorf("page %d is not an index page", p.number)
+	}
+	data, err := p.cell(index)
+	if err != nil {
+		return indexCell{}, err
 	}
 
-	return tableLeafCell{rowID: rowID, payload: data[:payloadSize]}, nil
+	// On interior pages, the cell starts with the number of its child page,
+	// as a 4-byte big-endian integer.
+	var cell indexCell
+	if p.pageType == pageTypeInteriorIndex {
+		if len(data) < 4 {
+			return indexCell{}, fmt.Errorf("page %d is corrupt: cell %d is out of bounds", p.number, index)
+		}
+		cell.leftChild = int(binary.BigEndian.Uint32(data))
+		data = data[4:]
+	}
+
+	// The size of the payload follows as a varint, and then the payload.
+	payloadSize, n, err := readVarint(data)
+	if err != nil {
+		return indexCell{}, fmt.Errorf("page %d, cell %d: invalid payload size: %w", p.number, index, err)
+	}
+
+	// On index pages, a payload spills over to overflow pages when it takes
+	// up more than about a quarter of the usable size of the page.
+	maxLocal := (len(p.data)-12)*64/255 - 23
+	if cell.payload, err = p.localPayload(index, data[n:], payloadSize, maxLocal); err != nil {
+		return indexCell{}, err
+	}
+	return cell, nil
+}
+
+// localPayload returns the payload of the cell with the given index, which
+// is payloadSize bytes long and starts at the beginning of data. Payloads of
+// more than maxLocal bytes are too large to be stored on the page alone:
+// their end is stored on overflow pages, which is not supported.
+func (p *page) localPayload(index int, data []byte, payloadSize int64, maxLocal int) ([]byte, error) {
+	if payloadSize < 0 || payloadSize > int64(maxLocal) {
+		return nil, fmt.Errorf("page %d, cell %d: payloads stored on overflow pages are not supported", p.number, index)
+	}
+	if payloadSize > int64(len(data)) {
+		return nil, fmt.Errorf("page %d is corrupt: the payload of cell %d is out of bounds", p.number, index)
+	}
+	return data[:payloadSize], nil
 }

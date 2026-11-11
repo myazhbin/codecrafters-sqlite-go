@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -283,4 +284,30 @@ func encodeTableLeafCell(rowID int64, values ...any) []byte {
 func encodeTableInteriorCell(leftChild uint32, rowID int64) []byte {
 	cell := binary.BigEndian.AppendUint32(nil, leftChild)
 	return appendVarint(cell, rowID)
+}
+
+// encodeIndexLeafCell encodes a cell of an index leaf page that stores an
+// entry with the given values: the indexed columns, followed by the rowid.
+func encodeIndexLeafCell(values ...any) []byte {
+	record := encodeRecord(values...)
+	return append(appendVarint(nil, int64(len(record))), record...)
+}
+
+// encodeIndexInteriorCell encodes a cell of an index interior page that
+// points to the child page with the given number, and stores an entry with
+// the given values.
+func encodeIndexInteriorCell(leftChild uint32, values ...any) []byte {
+	cell := binary.BigEndian.AppendUint32(nil, leftChild)
+	return append(cell, encodeIndexLeafCell(values...)...)
+}
+
+// countingReader counts the reads from a database file.
+type countingReader struct {
+	file  io.ReaderAt
+	reads int
+}
+
+func (r *countingReader) ReadAt(p []byte, offset int64) (int, error) {
+	r.reads++
+	return r.file.ReadAt(p, offset)
 }

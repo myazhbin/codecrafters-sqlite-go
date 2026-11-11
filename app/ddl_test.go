@@ -340,3 +340,121 @@ func TestParseCreateTableOfGeneratedSchemas(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCreateIndex(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want indexDefinition
+	}{
+		{
+			"index of the companies database",
+			"CREATE INDEX idx_companies_country\n\ton companies (country)",
+			indexDefinition{
+				name:    "idx_companies_country",
+				table:   "companies",
+				columns: []indexedColumn{{name: "country"}},
+			},
+		},
+		{
+			"keywords in any case",
+			"create unique index Idx on Fruits (Name)",
+			indexDefinition{name: "Idx", table: "Fruits", columns: []indexedColumn{{name: "Name"}}},
+		},
+		{
+			"qualified name and IF NOT EXISTS",
+			"CREATE INDEX IF NOT EXISTS main.idx ON fruits (name);",
+			indexDefinition{name: "idx", table: "fruits", columns: []indexedColumn{{name: "name"}}},
+		},
+		{
+			"quoted names",
+			"CREATE INDEX \"my index\" ON [my table] (`size range`)",
+			indexDefinition{name: "my index", table: "my table", columns: []indexedColumn{{name: "size range"}}},
+		},
+		{
+			"several columns",
+			"CREATE INDEX idx ON fruits (color, name, id)",
+			indexDefinition{
+				name:    "idx",
+				table:   "fruits",
+				columns: []indexedColumn{{name: "color"}, {name: "name"}, {name: "id"}},
+			},
+		},
+		{
+			"collating sequences and sort orders",
+			"CREATE INDEX idx ON fruits (a COLLATE NOCASE, b DESC, c collate rtrim desc, d ASC, e COLLATE \"binary\" ASC)",
+			indexDefinition{
+				name:  "idx",
+				table: "fruits",
+				columns: []indexedColumn{
+					{name: "a", collation: "NOCASE"},
+					{name: "b", descending: true},
+					{name: "c", collation: "RTRIM", descending: true},
+					{name: "d"},
+					{name: "e", collation: "BINARY"},
+				},
+			},
+		},
+		{
+			// Only columns have names: an index can't be searched by the
+			// value of a column through an expression.
+			"expressions",
+			"CREATE INDEX idx ON fruits (lower(name), price * 2, name || color DESC, (id), 'literal')",
+			indexDefinition{name: "idx", table: "fruits", columns: make([]indexedColumn, 5)},
+		},
+		{
+			"partial index",
+			"CREATE INDEX idx ON fruits (name) WHERE color = 'Red' AND name IS NOT NULL",
+			indexDefinition{name: "idx", table: "fruits", columns: []indexedColumn{{name: "name"}}, partial: true},
+		},
+		{
+			"comments",
+			"CREATE INDEX idx -- the index\nON fruits /* the table */ (name)",
+			indexDefinition{name: "idx", table: "fruits", columns: []indexedColumn{{name: "name"}}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseCreateIndex(tt.sql)
+			if err != nil {
+				t.Fatalf("parseCreateIndex(%q) returned an error: %v", tt.sql, err)
+			}
+			if !reflect.DeepEqual(*got, tt.want) {
+				t.Errorf("parseCreateIndex(%q)\n got %+v\nwant %+v", tt.sql, *got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseCreateIndexRejectsInvalidStatements(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		wantErr string
+	}{
+		{"empty statement", "", "incomplete input"},
+		{"table definition", "CREATE TABLE t (a)", `near "TABLE": syntax error`},
+		{"missing name", "CREATE INDEX ON fruits (name)", `near "ON": syntax error`},
+		{"missing ON", "CREATE INDEX idx fruits (name)", `near "fruits": syntax error`},
+		{"missing table", "CREATE INDEX idx ON (name)", `near "(": syntax error`},
+		{"missing columns", "CREATE INDEX idx ON fruits", "incomplete input"},
+		{"no columns", "CREATE INDEX idx ON fruits ()", `near ")": syntax error`},
+		{"trailing comma", "CREATE INDEX idx ON fruits (name,)", `near ")": syntax error`},
+		{"missing closing parenthesis", "CREATE INDEX idx ON fruits (name", "incomplete input"},
+		{"text after the columns", "CREATE INDEX idx ON fruits (name) extra", `near "extra": syntax error`},
+		{"unterminated string", "CREATE INDEX idx ON fruits ('name)", "unterminated string literal: 'name)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			definition, err := parseCreateIndex(tt.sql)
+			if err == nil {
+				t.Fatalf("parseCreateIndex(%q) = %+v, want an error", tt.sql, *definition)
+			}
+			if err.Error() != tt.wantErr {
+				t.Errorf("parseCreateIndex(%q) returned error %q, want %q", tt.sql, err, tt.wantErr)
+			}
+		})
+	}
+}

@@ -421,3 +421,117 @@ func TestReadPageHonorsReservedSpace(t *testing.T) {
 		})
 	}
 }
+
+func TestIndexCell(t *testing.T) {
+	leafCells := [][]byte{
+		encodeIndexLeafCell("eritrea", 121311),
+		encodeIndexLeafCell(nil, 7),
+		// A payload of more than 127 bytes, whose size takes a 2-byte varint.
+		encodeIndexLeafCell(strings.Repeat("x", 150), 9),
+	}
+	interiorCells := [][]byte{
+		encodeIndexInteriorCell(7, "eritrea", 121311),
+		encodeIndexInteriorCell(0x0a0b0c0d, strings.Repeat("x", 150), 9),
+	}
+	db := newTestDatabase(t, buildDatabase(4096,
+		testPage{pageType: pageTypeLeafIndex, cells: leafCells},
+		testPage{pageType: pageTypeLeafIndex, cells: leafCells},
+		testPage{pageType: pageTypeInteriorIndex, cells: interiorCells, rightMostChild: 5},
+	))
+
+	tests := []struct {
+		page          int
+		index         int
+		wantLeftChild int
+		wantPayload   []byte
+	}{
+		{1, 0, 0, encodeRecord("eritrea", 121311)},
+		{1, 1, 0, encodeRecord(nil, 7)},
+		{1, 2, 0, encodeRecord(strings.Repeat("x", 150), 9)},
+		{2, 0, 0, encodeRecord("eritrea", 121311)},
+		{2, 2, 0, encodeRecord(strings.Repeat("x", 150), 9)},
+		{3, 0, 7, encodeRecord("eritrea", 121311)},
+		{3, 1, 0x0a0b0c0d, encodeRecord(strings.Repeat("x", 150), 9)},
+	}
+
+	for _, tt := range tests {
+		p, err := db.readPage(tt.page)
+		if err != nil {
+			t.Fatalf("readPage(%d) returned an error: %v", tt.page, err)
+		}
+		cell, err := p.indexCell(tt.index)
+		if err != nil {
+			t.Errorf("page %d: indexCell(%d) returned an error: %v", tt.page, tt.index, err)
+			continue
+		}
+		if cell.leftChild != tt.wantLeftChild {
+			t.Errorf("page %d: indexCell(%d).leftChild = %d, want %d", tt.page, tt.index, cell.leftChild, tt.wantLeftChild)
+		}
+		if !bytes.Equal(cell.payload, tt.wantPayload) {
+			t.Errorf("page %d: indexCell(%d).payload = % x, want % x", tt.page, tt.index, cell.payload, tt.wantPayload)
+		}
+	}
+}
+
+func TestIndexCellRejectsOtherPageTypes(t *testing.T) {
+	cells := [][]byte{encodeIndexLeafCell("x", 1)}
+	db := newTestDatabase(t, buildDatabase(512,
+		testPage{pageType: pageTypeLeafTable, cells: cells},
+		testPage{pageType: pageTypeInteriorTable, cells: cells},
+	))
+
+	for number := 1; number <= 2; number++ {
+		p, err := db.readPage(number)
+		if err != nil {
+			t.Fatalf("readPage(%d) returned an error: %v", number, err)
+		}
+		if _, err := p.indexCell(0); err == nil {
+			t.Errorf("page %d: indexCell returned no error for page type 0x%02x", number, p.pageType)
+		}
+	}
+}
+
+func TestIndexCellRejectsInvalidCells(t *testing.T) {
+	// A page of 512 bytes stores index payloads of up to
+	// (512 - 12) * 64 / 255 - 23 = 102 bytes without overflow pages.
+	largestLocal := encodeIndexLeafCell(strings.Repeat("x", 98), 1)
+	overflowing := encodeIndexLeafCell(strings.Repeat("x", 99), 1)
+
+	tests := []struct {
+		name     string
+		pageType byte
+		cell     []byte
+		wantErr  bool
+	}{
+		{"largest local payload", pageTypeLeafIndex, largestLocal, false},
+		{"payload on overflow pages", pageTypeLeafIndex, overflowing, true},
+		// The cell is stored at the very end of the page, so these cells run
+		// into the end of the page.
+		{"missing payload size", pageTypeInteriorIndex, []byte{0x00, 0x00, 0x00, 0x02}, true},
+		{"truncated child page number", pageTypeInteriorIndex, []byte{0x00, 0x00, 0x02}, true},
+		{"truncated payload size", pageTypeLeafIndex, []byte{0x81}, true},
+		{"payload past the end of the page", pageTypeLeafIndex, []byte{0x05, 0x02, 0x01}, true},
+		{
+			"negative payload size", pageTypeLeafIndex,
+			[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := newTestDatabase(t, buildDatabase(512,
+				testPage{pageType: pageTypeLeafTable},
+				testPage{pageType: tt.pageType, cells: [][]byte{tt.cell}},
+			))
+			p, err := db.readPage(2)
+			if err != nil {
+				t.Fatalf("readPage returned an error: %v", err)
+			}
+
+			_, err = p.indexCell(0)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf("indexCell returned error %v, want an error: %t", err, tt.wantErr)
+			}
+		})
+	}
+}

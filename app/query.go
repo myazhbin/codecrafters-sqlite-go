@@ -41,15 +41,36 @@ func executeSQL(db *database, sql string, stdout io.Writer) error {
 	// Like the sqlite3 command-line shell does by default, separate the
 	// values of a row with pipes.
 	fields := make([]string, len(columns))
-	return db.scanTable(table, func(r row) error {
-		if !where.matches(r) {
-			return nil
-		}
+	return db.selectRows(table, where, func(r row) error {
 		for i, column := range columns {
 			fields[i] = formatValue(r.value(column))
 		}
 		_, err := fmt.Fprintln(stdout, strings.Join(fields, "|"))
 		return err
+	})
+}
+
+// selectRows calls visit for every row of a table that meets the condition of
+// a WHERE clause, in the order of their rowids. It stops at the first error
+// that visit returns, and returns that error.
+func (db *database) selectRows(t *table, where *filter, visit func(row) error) error {
+	if index := where.index(t); index != nil {
+		// Rather than reading every row of the table, look up the rowids of
+		// the rows to select in the index, and then those rows in the table.
+		return db.searchIndex(index.rootPage, where.value, where.collation, func(rowID int64) error {
+			r, err := db.findRow(t, rowID)
+			if err != nil {
+				return err
+			}
+			return visit(r)
+		})
+	}
+
+	return db.scanTable(t, func(r row) error {
+		if !where.matches(r) {
+			return nil
+		}
+		return visit(r)
 	})
 }
 
@@ -62,11 +83,20 @@ func (db *database) countMatchingRows(t *table, where *filter) (int, error) {
 	}
 
 	rowCount := 0
-	err := db.scanTable(t, func(r row) error {
-		if where.matches(r) {
-			rowCount++
-		}
+	countRow := func() error {
+		rowCount++
 		return nil
+	}
+	if index := where.index(t); index != nil {
+		// An index has one entry for every row.
+		err := db.searchIndex(index.rootPage, where.value, where.collation, func(int64) error { return countRow() })
+		return rowCount, err
+	}
+	err := db.scanTable(t, func(r row) error {
+		if !where.matches(r) {
+			return nil
+		}
+		return countRow()
 	})
 	return rowCount, err
 }
@@ -113,6 +143,19 @@ func newFilter(t *table, condition *comparison) (*filter, error) {
 		value:     convertForComparison(condition.value, column.affinity()),
 		collation: collation,
 	}, nil
+}
+
+// index returns an index of the table that the filter was resolved against
+// in which the rows that meet the condition can be looked up. It returns nil
+// if there is no such index, in which case the rows of the table have to be
+// checked one by one.
+func (f *filter) index(t *table) *index {
+	// An index speeds up the search for the rows with a given value. No row
+	// meets a comparison with NULL, while indexes do have entries for NULL.
+	if f == nil || f.operator != "=" || f.value == nil {
+		return nil
+	}
+	return t.findIndex(f.column, f.collation)
 }
 
 // matches reports whether a row meets the condition. Every row meets a nil

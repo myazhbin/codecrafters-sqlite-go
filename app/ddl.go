@@ -265,3 +265,125 @@ func parseColumnDefinition(definition []token) (column columnDefinition, isRowID
 	}
 	return column, isRowID, nil
 }
+
+// indexDefinition is a parsed CREATE INDEX statement.
+type indexDefinition struct {
+	// name is the name of the index.
+	name string
+	// table is the name of the table that the index is on.
+	table string
+	// columns holds the indexed columns, in the order in which their values
+	// are stored in the entries of the index.
+	columns []indexedColumn
+	// partial reports whether the index has a WHERE clause, and so only has
+	// entries for some of the rows of its table.
+	partial bool
+}
+
+// indexedColumn is a column of an index.
+type indexedColumn struct {
+	// name is the name of the column of the table that is indexed. It is
+	// empty if the index is on an expression rather than on a column.
+	name string
+	// collation is the name of the collating sequence that the index orders
+	// the column with, in upper case. It is empty if the index uses the
+	// collating sequence of the column.
+	collation string
+	// descending reports whether the index orders the column from its
+	// highest to its lowest value.
+	descending bool
+}
+
+// parseCreateIndex parses a CREATE INDEX statement, as stored in the sql
+// column of the sqlite_schema table.
+func parseCreateIndex(sql string) (*indexDefinition, error) {
+	tokens, err := tokenize(sql)
+	if err != nil {
+		return nil, err
+	}
+	p := &parser{tokens: tokens}
+	index := &indexDefinition{}
+
+	if err := p.expectKeyword("CREATE"); err != nil {
+		return nil, err
+	}
+	p.acceptKeyword("UNIQUE")
+	if err := p.expectKeyword("INDEX"); err != nil {
+		return nil, err
+	}
+	if p.acceptKeyword("IF") {
+		if err := p.expectKeywords("NOT", "EXISTS"); err != nil {
+			return nil, err
+		}
+	}
+	if index.name, err = p.expectName(); err != nil {
+		return nil, err
+	}
+	if p.acceptSymbol(".") {
+		// The name was qualified with the name of its schema.
+		if index.name, err = p.expectName(); err != nil {
+			return nil, err
+		}
+	}
+	if err := p.expectKeyword("ON"); err != nil {
+		return nil, err
+	}
+	if index.table, err = p.expectName(); err != nil {
+		return nil, err
+	}
+
+	if err := p.expectSymbol("("); err != nil {
+		return nil, err
+	}
+	for {
+		item, err := p.definitionItem()
+		if err != nil {
+			return nil, err
+		}
+		index.columns = append(index.columns, parseIndexedColumn(item))
+		if !p.acceptSymbol(",") {
+			break
+		}
+	}
+	if err := p.expectSymbol(")"); err != nil {
+		return nil, err
+	}
+
+	if p.acceptKeyword("WHERE") {
+		// The rest of the statement is the condition that rows must meet to
+		// be in the index.
+		index.partial = true
+		return index, nil
+	}
+	p.acceptSymbol(";")
+	if t := p.peek(); t.kind != tokenEOF {
+		return nil, syntaxError(t)
+	}
+	return index, nil
+}
+
+// parseIndexedColumn parses the tokens of an indexed column of a CREATE INDEX
+// statement.
+func parseIndexedColumn(tokens []token) indexedColumn {
+	if tokens[0].kind != tokenIdentifier {
+		return indexedColumn{}
+	}
+	column := indexedColumn{name: tokens[0].text}
+
+	// The name of the column can be followed by a collating sequence and by
+	// a sort order.
+	rest := tokens[1:]
+	if len(rest) >= 2 && rest[0].isKeyword("COLLATE") && rest[1].kind == tokenIdentifier {
+		column.collation = strings.ToUpper(rest[1].text)
+		rest = rest[2:]
+	}
+	if len(rest) >= 1 && (rest[0].isKeyword("ASC") || rest[0].isKeyword("DESC")) {
+		column.descending = rest[0].isKeyword("DESC")
+		rest = rest[1:]
+	}
+	if len(rest) > 0 {
+		// Anything else makes this an expression, like lower(name).
+		return indexedColumn{}
+	}
+	return column
+}
