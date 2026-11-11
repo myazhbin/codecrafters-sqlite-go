@@ -9,11 +9,11 @@ import (
 // selectStatement is a parsed SELECT statement.
 type selectStatement struct {
 	// count reports whether the statement selects COUNT(*), the number of
-	// rows, rather than a column.
+	// rows, rather than columns.
 	count bool
-	// column is the name of the column to select. It is empty if count is
-	// set.
-	column string
+	// columns holds the names of the columns to select, in the order in
+	// which to output them. It is empty if count is set.
+	columns []string
 	// table is the name of the table to read from.
 	table string
 }
@@ -21,7 +21,7 @@ type selectStatement struct {
 // parseSelect parses a SELECT statement. The supported forms are:
 //
 //	SELECT COUNT(*) FROM table
-//	SELECT column FROM table
+//	SELECT column, ... FROM table
 func parseSelect(sql string) (*selectStatement, error) {
 	tokens, err := tokenize(sql)
 	if err != nil {
@@ -33,21 +33,30 @@ func parseSelect(sql string) (*selectStatement, error) {
 	if err := p.expectKeyword("SELECT"); err != nil {
 		return nil, err
 	}
-	name, err := p.expectName()
-	if err != nil {
-		return nil, err
-	}
-	if p.acceptSymbol("(") {
-		// A name that is followed by a parenthesis is a function call.
-		if !strings.EqualFold(name, "COUNT") {
-			return nil, fmt.Errorf("no such function: %s", name)
-		}
-		if err := p.expectSymbols("*", ")"); err != nil {
+	for resultColumns := 1; ; resultColumns++ {
+		name, err := p.expectName()
+		if err != nil {
 			return nil, err
 		}
-		statement.count = true
-	} else {
-		statement.column = name
+		if p.acceptSymbol("(") {
+			// A name that is followed by a parenthesis is a function call.
+			if !strings.EqualFold(name, "COUNT") {
+				return nil, fmt.Errorf("no such function: %s", name)
+			}
+			if err := p.expectSymbols("*", ")"); err != nil {
+				return nil, err
+			}
+			statement.count = true
+		} else {
+			statement.columns = append(statement.columns, name)
+		}
+		if statement.count && resultColumns > 1 {
+			return nil, errors.New("selecting COUNT(*) along with other columns is not supported")
+		}
+
+		if !p.acceptSymbol(",") {
+			break
+		}
 	}
 
 	if err := p.expectKeyword("FROM"); err != nil {

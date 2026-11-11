@@ -178,11 +178,106 @@ func TestSelectColumnMatchesSQLite(t *testing.T) {
 	}
 }
 
+func TestSelectColumns(t *testing.T) {
+	tests := []struct {
+		sql  string
+		want string
+	}{
+		{
+			"SELECT name, color FROM apples",
+			"Granny Smith|Light Green\nFuji|Red\nHoneycrisp|Blush Red\nGolden Delicious|Yellow\n",
+		},
+		{
+			"select color,name from apples",
+			"Light Green|Granny Smith\nRed|Fuji\nBlush Red|Honeycrisp\nYellow|Golden Delicious\n",
+		},
+		{
+			"SELECT id, name, color FROM apples;",
+			"1|Granny Smith|Light Green\n2|Fuji|Red\n3|Honeycrisp|Blush Red\n4|Golden Delicious|Yellow\n",
+		},
+		{
+			"SELECT name, id, name FROM apples",
+			"Granny Smith|1|Granny Smith\nFuji|2|Fuji\nHoneycrisp|3|Honeycrisp\nGolden Delicious|4|Golden Delicious\n",
+		},
+		{
+			`SELECT "Name", DESCRIPTION FROM Oranges`,
+			"Mandarin|great for snacking\n" +
+				"Tangelo|sweet and tart\n" +
+				"Tangerine|great for sweeter juice\n" +
+				"Clementine|usually seedless, great for snacking\n" +
+				"Valencia Orange|best for juicing\n" +
+				"Navel Orange|sweet with slight bitterness\n",
+		},
+		{"SELECT name, seq FROM sqlite_sequence", "apples|4\noranges|6\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			if got := runCommand(t, sampleDB, tt.sql); got != tt.want {
+				t.Errorf("output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSelectColumnsMatchesSQLite compares the output of multi-column queries
+// with the output of the sqlite3 command-line shell.
+func TestSelectColumnsMatchesSQLite(t *testing.T) {
+	path := createDatabase(t, `
+		CREATE TABLE products (
+			id INTEGER PRIMARY KEY,
+			name TEXT,
+			price REAL,
+			stock INTEGER,
+			data BLOB,
+			"release date" TEXT
+		);
+		INSERT INTO products VALUES (1, 'apple', 1.5, 10, x'68656c6c6f', '2024-01-02');
+		INSERT INTO products VALUES (2, 'banana', 2, 0, NULL, NULL);
+		INSERT INTO products VALUES (5, NULL, NULL, NULL, NULL, NULL);
+		INSERT INTO products VALUES (7, '', 0.25, -1, x'', '');
+		INSERT INTO products VALUES (8, 'a|b', 1e100, 9223372036854775807, x'41', 'pipe | pipe');
+		ALTER TABLE products ADD COLUMN added TEXT;
+		INSERT INTO products (name, added) VALUES ('late', 'new column');
+	`)
+
+	for _, sql := range []string{
+		"SELECT name, price FROM products",
+		"SELECT id, name, price, stock, data, \"release date\", added FROM products",
+		"SELECT added, data, stock, price, name, id FROM products",
+		"SELECT price, price, id, id FROM products",
+		"SELECT data, added FROM products",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			got := runCommand(t, path, sql)
+			if want := sqlite3Output(t, path, sql); got != want {
+				t.Errorf("output = %q, sqlite3 prints %q", got, want)
+			}
+		})
+	}
+}
+
+func TestSelectColumnsRejectsUnknownColumns(t *testing.T) {
+	for _, sql := range []string{
+		"SELECT flavor, name FROM apples",
+		"SELECT name, flavor FROM apples",
+		"SELECT name, color, flavor FROM apples",
+	} {
+		err := runSQLError(t, sampleDB, sql)
+
+		if want := "no such column: flavor"; err.Error() != want {
+			t.Errorf("%s: error = %q, want %q", sql, err, want)
+		}
+	}
+}
+
 func TestSelectColumnOfEmptyTable(t *testing.T) {
 	path := createDatabase(t, "CREATE TABLE fruits (id integer primary key, name text);")
 
-	if got := runCommand(t, path, "SELECT name FROM fruits"); got != "" {
-		t.Errorf("output = %q, want no output", got)
+	for _, sql := range []string{"SELECT name FROM fruits", "SELECT id, name FROM fruits"} {
+		if got := runCommand(t, path, sql); got != "" {
+			t.Errorf("%s: output = %q, want no output", sql, got)
+		}
 	}
 }
 

@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+// selectColumns returns the statement that selects the given columns of a
+// table.
+func selectColumns(table string, columns ...string) selectStatement {
+	return selectStatement{columns: columns, table: table}
+}
+
 func TestParseSelect(t *testing.T) {
 	countApples := selectStatement{count: true, table: "apples"}
 
@@ -26,15 +32,27 @@ func TestParseSelect(t *testing.T) {
 		{"table named like a keyword", `SELECT COUNT(*) FROM "from"`, selectStatement{count: true, table: "from"}},
 		{"comments", "SELECT /* how many */ COUNT(*) FROM apples -- all of them", countApples},
 
-		{"column", "SELECT name FROM apples", selectStatement{column: "name", table: "apples"}},
-		{"column with lowercase keywords", "select name from apples", selectStatement{column: "name", table: "apples"}},
-		{"column in mixed case", "SELECT Name FROM Apples;", selectStatement{column: "Name", table: "Apples"}},
-		{"quoted column", `SELECT "size range" FROM companies`, selectStatement{column: "size range", table: "companies"}},
-		{"column named like a keyword", `SELECT "select" FROM "from"`, selectStatement{column: "select", table: "from"}},
+		{"column", "SELECT name FROM apples", selectColumns("apples", "name")},
+		{"column with lowercase keywords", "select name from apples", selectColumns("apples", "name")},
+		{"column in mixed case", "SELECT Name FROM Apples;", selectColumns("Apples", "Name")},
+		{"quoted column", `SELECT "size range" FROM companies`, selectColumns("companies", "size range")},
+		{"column named like a keyword", `SELECT "select" FROM "from"`, selectColumns("from", "select")},
 		// COUNT is only a function when it's called.
-		{"column named count", "SELECT count FROM apples", selectStatement{column: "count", table: "apples"}},
+		{"column named count", "SELECT count FROM apples", selectColumns("apples", "count")},
 		// Most of SQLite's keywords can be used as names.
-		{"column named key", "SELECT key FROM apples", selectStatement{column: "key", table: "apples"}},
+		{"column named key", "SELECT key FROM apples", selectColumns("apples", "key")},
+
+		{"two columns", "SELECT name, color FROM apples", selectColumns("apples", "name", "color")},
+		{"three columns", "SELECT id, name, color FROM apples", selectColumns("apples", "id", "name", "color")},
+		{"columns without whitespace", "select name,color from apples", selectColumns("apples", "name", "color")},
+		{"columns with extra whitespace", "SELECT name ,\n\tcolor\nFROM apples", selectColumns("apples", "name", "color")},
+		{"repeated column", "SELECT name, name FROM apples", selectColumns("apples", "name", "name")},
+		{
+			"quoted columns",
+			"SELECT \"size range\", [total employees], `id` FROM companies",
+			selectColumns("companies", "size range", "total employees", "id"),
+		},
+		{"columns named like functions", "SELECT count, max FROM apples", selectColumns("apples", "count", "max")},
 	}
 
 	for _, tt := range tests {
@@ -76,6 +94,27 @@ func TestParseSelectRejectsInvalidStatements(t *testing.T) {
 		{"quoted keyword", `"SELECT" COUNT(*) FROM apples`, `near "SELECT": syntax error`},
 		{"other statement", "DELETE FROM apples", `near "DELETE": syntax error`},
 		{"other function", "SELECT max(id) FROM apples", "no such function: max"},
+		{"trailing comma", "SELECT name, FROM apples", `near "FROM": syntax error`},
+		{"leading comma", "SELECT , name FROM apples", `near ",": syntax error`},
+		{"doubled comma", "SELECT name,, color FROM apples", `near ",": syntax error`},
+		{"missing comma", "SELECT name color FROM apples", `near "color": syntax error`},
+		{"column list without FROM", "SELECT name, color", "incomplete input"},
+		{"column list that ends early", "SELECT name,", "incomplete input"},
+		{
+			"count after a column",
+			"SELECT name, COUNT(*) FROM apples",
+			"selecting COUNT(*) along with other columns is not supported",
+		},
+		{
+			"count before a column",
+			"SELECT COUNT(*), name FROM apples",
+			"selecting COUNT(*) along with other columns is not supported",
+		},
+		{
+			"two counts",
+			"SELECT COUNT(*), COUNT(*) FROM apples",
+			"selecting COUNT(*) along with other columns is not supported",
+		},
 		{"unterminated string", "SELECT COUNT(*) FROM 'apples", "unterminated string literal: 'apples"},
 	}
 

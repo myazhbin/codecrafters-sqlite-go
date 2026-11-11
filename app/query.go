@@ -29,12 +29,21 @@ func executeSQL(db *database, sql string, stdout io.Writer) error {
 		return err
 	}
 
-	column, err := table.columnIndex(statement.column)
-	if err != nil {
-		return err
+	columns := make([]int, len(statement.columns))
+	for i, name := range statement.columns {
+		if columns[i], err = table.columnIndex(name); err != nil {
+			return err
+		}
 	}
+
+	// Like the sqlite3 command-line shell does by default, separate the
+	// values of a row with pipes.
+	fields := make([]string, len(columns))
 	return db.scanTable(table, func(r row) error {
-		_, err := fmt.Fprintln(stdout, formatValue(r.value(column)))
+		for i, column := range columns {
+			fields[i] = formatValue(r.value(column))
+		}
+		_, err := fmt.Fprintln(stdout, strings.Join(fields, "|"))
 		return err
 	})
 }

@@ -13,7 +13,7 @@ import (
 
 // Usage: your_program.sh sample.db .dbinfo
 //
-//	your_program.sh sample.db "SELECT name FROM apples"
+//	your_program.sh sample.db "SELECT name, color FROM apples"
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "Usage: your_program.sh <database file> <command>")
