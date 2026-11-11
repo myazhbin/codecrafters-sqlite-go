@@ -67,6 +67,21 @@ func (db *database) readSchema() ([]schemaObject, error) {
 	return objects, nil
 }
 
+// findTable returns the row of the sqlite_schema table that describes the
+// table with the given name. Like SQLite, it ignores the case of the name.
+func (db *database) findTable(name string) (schemaObject, error) {
+	schema, err := db.readSchema()
+	if err != nil {
+		return schemaObject{}, err
+	}
+	for _, object := range schema {
+		if object.kind == "table" && strings.EqualFold(object.name, name) {
+			return object, nil
+		}
+	}
+	return schemaObject{}, fmt.Errorf("no such table: %s", name)
+}
+
 // newSchemaObject builds a schemaObject from the values of the columns of a
 // sqlite_schema row: type, name, tbl_name, rootpage and sql.
 func newSchemaObject(values []any) (schemaObject, error) {

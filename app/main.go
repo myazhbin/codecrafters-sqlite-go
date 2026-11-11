@@ -11,6 +11,8 @@ import (
 )
 
 // Usage: your_program.sh sample.db .dbinfo
+//
+//	your_program.sh sample.db "SELECT COUNT(*) FROM apples"
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "Usage: your_program.sh <database file> <command>")
@@ -37,13 +39,16 @@ func run(databaseFilePath, command string, stdout io.Writer) error {
 		return err
 	}
 
-	switch command {
-	case ".dbinfo":
+	switch {
+	case command == ".dbinfo":
 		return printDBInfo(db, stdout)
-	case ".tables":
+	case command == ".tables":
 		return printTables(db, stdout)
-	default:
+	case strings.HasPrefix(command, "."):
 		return fmt.Errorf("Unknown command %s", command)
+	default:
+		// Anything that isn't a dot command is a SQL statement.
+		return executeSQL(db, command, stdout)
 	}
 }
 
