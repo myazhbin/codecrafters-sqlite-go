@@ -91,40 +91,18 @@ func (r row) value(column int) any {
 // rowids. It stops at the first error that visit returns, and returns that
 // error.
 func (db *database) scanTable(t *table, visit func(row) error) error {
-	root, err := db.readPage(t.rootPage)
-	if err != nil {
-		return err
-	}
-	// A table that fits on a single page is stored on a leaf page, which holds
-	// one cell for every row.
-	if root.pageType != pageTypeLeafTable {
-		return fmt.Errorf("table %s spans multiple pages, which is not supported", t.name)
-	}
-
-	for i := 0; i < root.cellCount; i++ {
-		cell, err := root.tableLeafCell(i)
-		if err != nil {
-			return err
-		}
-		values, err := decodeRecord(cell.payload)
-		if err != nil {
-			return fmt.Errorf("failed to decode row %d of table %s: %w", cell.rowID, t.name, err)
-		}
-		if err := visit(row{table: t, rowID: cell.rowID, values: values}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return db.scanTableBTree(t.rootPage, func(rowID int64, values []any) error {
+		return visit(row{table: t, rowID: rowID, values: values})
+	})
 }
 
 // countRows returns the number of rows in a table.
 func (db *database) countRows(t *table) (int, error) {
-	root, err := db.readPage(t.rootPage)
-	if err != nil {
-		return 0, err
-	}
-	if root.pageType != pageTypeLeafTable {
-		return 0, fmt.Errorf("table %s spans multiple pages, which is not supported", t.name)
-	}
-	return root.cellCount, nil
+	rowCount := 0
+	err := db.walkTableLeaves(t.rootPage, func(leaf *page) error {
+		// A leaf page holds one cell for every row.
+		rowCount += leaf.cellCount
+		return nil
+	})
+	return rowCount, err
 }

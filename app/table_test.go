@@ -263,6 +263,7 @@ func TestScanTableRejectsInvalidTables(t *testing.T) {
 			// A payload of 2 bytes whose record header claims 9 bytes.
 			{0x02, 0x02, 0x09, 0x00},
 		}},
+		testPage{pageType: pageTypeLeafIndex},
 	)
 	db := newTestDatabase(t, data)
 
@@ -270,9 +271,10 @@ func TestScanTableRejectsInvalidTables(t *testing.T) {
 		name     string
 		rootPage int
 	}{
-		{"table that spans multiple pages", 2},
+		{"interior page without a right-most child", 2},
 		{"row with an invalid record", 3},
-		{"root page past the end of the file", 4},
+		{"root page of an index", 4},
+		{"root page past the end of the file", 5},
 		{"root page zero", 0},
 	}
 	for _, tt := range tests {
@@ -283,6 +285,70 @@ func TestScanTableRejectsInvalidTables(t *testing.T) {
 				t.Error("scanTable returned no error")
 			}
 		})
+	}
+}
+
+func TestScanTableThatSpansMultiplePages(t *testing.T) {
+	db := newTestDatabase(t, buildDatabase(512,
+		testPage{pageType: pageTypeLeafTable},
+		// Page 2 is the root page: an interior page with three child pages.
+		testPage{
+			pageType:       pageTypeInteriorTable,
+			rightMostChild: 5,
+			cells:          [][]byte{encodeTableInteriorCell(3, 2), encodeTableInteriorCell(4, 4)},
+		},
+		testPage{pageType: pageTypeLeafTable, cells: [][]byte{
+			encodeTableLeafCell(1, nil, "apple"),
+			encodeTableLeafCell(2, nil, "banana"),
+		}},
+		testPage{pageType: pageTypeLeafTable, cells: [][]byte{
+			encodeTableLeafCell(3, nil, "cherry"),
+			encodeTableLeafCell(4, nil, "date"),
+		}},
+		testPage{pageType: pageTypeLeafTable, cells: [][]byte{
+			encodeTableLeafCell(5, nil, "elderberry"),
+		}},
+	))
+	fruits := &table{name: "fruits", rootPage: 2, columns: columns("id", "INTEGER", "name", "TEXT"), rowIDColumn: 0}
+
+	got := collectRows(t, db, fruits)
+
+	want := [][]any{
+		{int64(1), "apple"},
+		{int64(2), "banana"},
+		{int64(3), "cherry"},
+		{int64(4), "date"},
+		{int64(5), "elderberry"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rows = %#v, want %#v", got, want)
+	}
+
+	count, err := db.countRows(fruits)
+	if err != nil {
+		t.Fatalf("countRows returned an error: %v", err)
+	}
+	if count != len(want) {
+		t.Errorf("countRows = %d, want %d", count, len(want))
+	}
+}
+
+func TestCountRowsRejectsInvalidTables(t *testing.T) {
+	db := newTestDatabase(t, buildDatabase(512,
+		testPage{pageType: pageTypeLeafTable},
+		testPage{pageType: pageTypeInteriorTable, rightMostChild: 2},
+		testPage{pageType: pageTypeLeafIndex},
+	))
+
+	for name, rootPage := range map[string]int{
+		"interior page that points to itself": 2,
+		"root page of an index":               3,
+		"root page past the end of the file":  4,
+	} {
+		table := &table{name: "t", rootPage: rootPage, columns: columns("a", "TEXT"), rowIDColumn: -1}
+		if count, err := db.countRows(table); err == nil {
+			t.Errorf("%s: countRows = %d, want an error", name, count)
+		}
 	}
 }
 

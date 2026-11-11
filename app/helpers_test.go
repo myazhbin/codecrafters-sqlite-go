@@ -105,6 +105,9 @@ type testPage struct {
 	// cellCount is the cell count to write to the page header when the page
 	// has no cells.
 	cellCount uint16
+	// rightMostChild is the number of the right-most child page to write to
+	// the page header of an interior page.
+	rightMostChild uint32
 }
 
 // buildDatabase returns the contents of a database file with the given page
@@ -129,6 +132,7 @@ func buildDatabase(pageSize int, pages ...testPage) []byte {
 		pointersOffset := headerOffset + leafPageHeaderSize
 		if p.pageType == pageTypeInteriorTable || p.pageType == pageTypeInteriorIndex {
 			pointersOffset = headerOffset + interiorPageHeaderSize
+			binary.BigEndian.PutUint32(pageData[headerOffset+8:], p.rightMostChild)
 		}
 
 		cellCount := p.cellCount
@@ -271,4 +275,12 @@ func encodeTableLeafCell(rowID int64, values ...any) []byte {
 	cell := appendVarint(nil, int64(len(record)))
 	cell = appendVarint(cell, rowID)
 	return append(cell, record...)
+}
+
+// encodeTableInteriorCell encodes a cell of a table interior page that points
+// to the child page with the given number, and has the given rowid as its
+// key.
+func encodeTableInteriorCell(leftChild uint32, rowID int64) []byte {
+	cell := binary.BigEndian.AppendUint32(nil, leftChild)
+	return appendVarint(cell, rowID)
 }

@@ -40,31 +40,16 @@ func (o schemaObject) isInternal() bool {
 
 // readSchema reads all the rows of the sqlite_schema table.
 func (db *database) readSchema() ([]schemaObject, error) {
-	p, err := db.readPage(schemaPageNumber)
-	if err != nil {
-		return nil, err
-	}
-	if p.pageType != pageTypeLeafTable {
-		return nil, errors.New("a sqlite_schema table that spans multiple pages is not supported")
-	}
-
-	objects := make([]schemaObject, 0, p.cellCount)
-	for i := 0; i < p.cellCount; i++ {
-		cell, err := p.tableLeafCell(i)
-		if err != nil {
-			return nil, err
-		}
-		values, err := decodeRecord(cell.payload)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode row %d of sqlite_schema: %w", cell.rowID, err)
-		}
+	var objects []schemaObject
+	err := db.scanTableBTree(schemaPageNumber, func(rowID int64, values []any) error {
 		object, err := newSchemaObject(values)
 		if err != nil {
-			return nil, fmt.Errorf("invalid row %d of sqlite_schema: %w", cell.rowID, err)
+			return fmt.Errorf("invalid row %d of sqlite_schema: %w", rowID, err)
 		}
 		objects = append(objects, object)
-	}
-	return objects, nil
+		return nil
+	})
+	return objects, err
 }
 
 // newSchemaObject builds a schemaObject from the values of the columns of a

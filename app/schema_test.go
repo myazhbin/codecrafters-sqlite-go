@@ -86,8 +86,16 @@ func TestReadSchemaRejectsInvalidSchemas(t *testing.T) {
 		page testPage
 	}{
 		{
-			"schema that spans multiple pages",
+			"interior page without a right-most child",
 			testPage{pageType: pageTypeInteriorTable},
+		},
+		{
+			"interior page that points to itself",
+			testPage{pageType: pageTypeInteriorTable, rightMostChild: 1},
+		},
+		{
+			"index page",
+			testPage{pageType: pageTypeLeafIndex},
 		},
 		{
 			"row with a missing column",
@@ -165,6 +173,39 @@ func TestReadSchemaOfBuiltDatabase(t *testing.T) {
 		{kind: "view", name: "v", tableName: "v", rootPage: 0, sql: "CREATE VIEW v AS SELECT 1"},
 		{kind: "index", name: "sqlite_autoindex_apples_1", tableName: "apples", rootPage: 300},
 		{kind: "table", name: "pears", tableName: "pears"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("readSchema = %+v, want %+v", got, want)
+	}
+}
+
+func TestReadSchemaThatSpansMultiplePages(t *testing.T) {
+	// The rows of a large schema don't fit on page 1, which then is an
+	// interior page.
+	data := buildDatabase(512,
+		testPage{
+			pageType:       pageTypeInteriorTable,
+			rightMostChild: 3,
+			cells:          [][]byte{encodeTableInteriorCell(2, 2)},
+		},
+		testPage{pageType: pageTypeLeafTable, cells: [][]byte{
+			encodeTableLeafCell(1, "table", "apples", "apples", 4, "CREATE TABLE apples (id)"),
+			encodeTableLeafCell(2, "table", "bananas", "bananas", 5, "CREATE TABLE bananas (id)"),
+		}},
+		testPage{pageType: pageTypeLeafTable, cells: [][]byte{
+			encodeTableLeafCell(3, "table", "cherries", "cherries", 6, "CREATE TABLE cherries (id)"),
+		}},
+	)
+
+	got, err := newTestDatabase(t, data).readSchema()
+	if err != nil {
+		t.Fatalf("readSchema returned an error: %v", err)
+	}
+
+	want := []schemaObject{
+		{kind: "table", name: "apples", tableName: "apples", rootPage: 4, sql: "CREATE TABLE apples (id)"},
+		{kind: "table", name: "bananas", tableName: "bananas", rootPage: 5, sql: "CREATE TABLE bananas (id)"},
+		{kind: "table", name: "cherries", tableName: "cherries", rootPage: 6, sql: "CREATE TABLE cherries (id)"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("readSchema = %+v, want %+v", got, want)

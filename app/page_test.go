@@ -104,6 +104,123 @@ func TestPageCellRejectsCorruptPages(t *testing.T) {
 	}
 }
 
+func TestTableInteriorCell(t *testing.T) {
+	// Page 1 starts with the database header, which moves its page header.
+	root := testPage{
+		pageType:       pageTypeInteriorTable,
+		rightMostChild: 0x01020304,
+		cells: [][]byte{
+			encodeTableInteriorCell(7, 100),
+			// A child page number and a key that take several bytes.
+			encodeTableInteriorCell(0x0a0b0c0d, 1_000_000),
+			encodeTableInteriorCell(9, -1),
+		},
+	}
+	db := newTestDatabase(t, buildDatabase(512, root, root))
+
+	want := []tableInteriorCell{
+		{leftChild: 7, rowID: 100},
+		{leftChild: 0x0a0b0c0d, rowID: 1_000_000},
+		{leftChild: 9, rowID: -1},
+	}
+	for number := 1; number <= 2; number++ {
+		p, err := db.readPage(number)
+		if err != nil {
+			t.Fatalf("readPage(%d) returned an error: %v", number, err)
+		}
+		if got := p.rightMostChild(); got != 0x01020304 {
+			t.Errorf("page %d: rightMostChild() = %#x, want 0x01020304", number, got)
+		}
+		for i, wantCell := range want {
+			cell, err := p.tableInteriorCell(i)
+			if err != nil {
+				t.Errorf("page %d: tableInteriorCell(%d) returned an error: %v", number, i, err)
+				continue
+			}
+			if cell != wantCell {
+				t.Errorf("page %d: tableInteriorCell(%d) = %+v, want %+v", number, i, cell, wantCell)
+			}
+		}
+		if _, err := p.tableInteriorCell(len(want)); err == nil {
+			t.Errorf("page %d: tableInteriorCell(%d) returned no error", number, len(want))
+		}
+	}
+}
+
+func TestTableInteriorCellOfSampleDatabase(t *testing.T) {
+	requireFile(t, superheroesDB)
+	// Page 2 is the root page of the superheroes table.
+	p, err := openDatabase(t, superheroesDB).readPage(2)
+	if err != nil {
+		t.Fatalf("readPage returned an error: %v", err)
+	}
+	if p.pageType != pageTypeInteriorTable {
+		t.Fatalf("pageType = 0x%02x, want 0x%02x", p.pageType, pageTypeInteriorTable)
+	}
+
+	// The keys of the cells of an interior page are in ascending order.
+	previous := int64(0)
+	for i := 0; i < p.cellCount; i++ {
+		cell, err := p.tableInteriorCell(i)
+		if err != nil {
+			t.Fatalf("tableInteriorCell(%d) returned an error: %v", i, err)
+		}
+		if cell.rowID <= previous {
+			t.Errorf("cell %d has key %d, which isn't above the key %d of the previous cell", i, cell.rowID, previous)
+		}
+		if cell.leftChild < 2 {
+			t.Errorf("cell %d points to page %d", i, cell.leftChild)
+		}
+		previous = cell.rowID
+	}
+}
+
+func TestTableInteriorCellRejectsOtherPageTypes(t *testing.T) {
+	cells := [][]byte{encodeTableInteriorCell(2, 1)}
+	data := buildDatabase(512,
+		testPage{pageType: pageTypeLeafTable, cells: cells},
+		testPage{pageType: pageTypeLeafIndex, cells: cells},
+		testPage{pageType: pageTypeInteriorIndex, cells: cells},
+	)
+	db := newTestDatabase(t, data)
+
+	for number := 1; number <= 3; number++ {
+		p, err := db.readPage(number)
+		if err != nil {
+			t.Fatalf("readPage(%d) returned an error: %v", number, err)
+		}
+		if _, err := p.tableInteriorCell(0); err == nil {
+			t.Errorf("page %d: tableInteriorCell returned no error for page type 0x%02x", number, p.pageType)
+		}
+	}
+}
+
+func TestTableInteriorCellRejectsInvalidCells(t *testing.T) {
+	tests := []struct {
+		name string
+		cell []byte
+	}{
+		// The cell is stored at the very end of the page, so these cells run
+		// into the end of the page.
+		{"truncated child page number", []byte{0x00, 0x00, 0x02}},
+		{"missing key", []byte{0x00, 0x00, 0x00, 0x02}},
+		{"truncated key", []byte{0x00, 0x00, 0x00, 0x02, 0x81}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := buildDatabase(512, testPage{pageType: pageTypeInteriorTable, cells: [][]byte{tt.cell}})
+			p, err := newTestDatabase(t, data).readPage(1)
+			if err != nil {
+				t.Fatalf("readPage returned an error: %v", err)
+			}
+			if cell, err := p.tableInteriorCell(0); err == nil {
+				t.Errorf("tableInteriorCell = %+v, want an error", cell)
+			}
+		})
+	}
+}
+
 func TestTableLeafCell(t *testing.T) {
 	// The cell of the sqlite_schema row that describes the oranges table of
 	// the sample database: a payload of 120 bytes for the row with rowid 3.

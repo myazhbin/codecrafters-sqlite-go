@@ -96,6 +96,49 @@ func (p *page) cell(index int) ([]byte, error) {
 	return p.data[cellOffset:], nil
 }
 
+// rightMostChild returns the number of the right-most child page of an
+// interior page. An interior page with n cells has n+1 child pages: every cell
+// points to one, and the page header points to the last one.
+func (p *page) rightMostChild() int {
+	// The page number is a 4-byte big-endian integer at offset 8 of the page
+	// header.
+	return int(binary.BigEndian.Uint32(p.data[p.headerOffset+8:]))
+}
+
+// tableInteriorCell is a cell of an interior page of a table b-tree. It
+// points to a child page.
+type tableInteriorCell struct {
+	// leftChild is the number of the child page.
+	leftChild int
+	// rowID is the key of the cell. The rows under the child page all have
+	// rowids that are lower than or equal to it, and greater than the key of
+	// the previous cell.
+	rowID int64
+}
+
+// tableInteriorCell parses the cell with the given index of a table interior
+// page.
+func (p *page) tableInteriorCell(index int) (tableInteriorCell, error) {
+	if p.pageType != pageTypeInteriorTable {
+		return tableInteriorCell{}, fmt.Errorf("page %d is not a table interior page", p.number)
+	}
+	data, err := p.cell(index)
+	if err != nil {
+		return tableInteriorCell{}, err
+	}
+
+	// The cell is made up of the number of the child page, as a 4-byte
+	// big-endian integer, and of the key, as a varint.
+	if len(data) < 4 {
+		return tableInteriorCell{}, fmt.Errorf("page %d is corrupt: cell %d is out of bounds", p.number, index)
+	}
+	rowID, _, err := readVarint(data[4:])
+	if err != nil {
+		return tableInteriorCell{}, fmt.Errorf("page %d, cell %d: invalid rowid: %w", p.number, index, err)
+	}
+	return tableInteriorCell{leftChild: int(binary.BigEndian.Uint32(data)), rowID: rowID}, nil
+}
+
 // tableLeafCell is a cell of a leaf page of a table b-tree. It stores one row
 // of the table.
 type tableLeafCell struct {

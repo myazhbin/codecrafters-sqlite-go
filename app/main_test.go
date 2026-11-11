@@ -157,6 +157,45 @@ func TestTablesWithManyTables(t *testing.T) {
 	}
 }
 
+// TestCommandsWithSchemaThatSpansMultiplePages runs the commands on a
+// database with so many tables that the sqlite_schema table doesn't fit on
+// page 1.
+func TestCommandsWithSchemaThatSpansMultiplePages(t *testing.T) {
+	const tableCount = 300
+
+	var sql strings.Builder
+	var names []string
+	for i := 0; i < tableCount; i++ {
+		name := fmt.Sprintf("table_%03d", i)
+		names = append(names, name)
+		fmt.Fprintf(&sql, "CREATE TABLE %s (id integer primary key, name text);\n", name)
+	}
+	sql.WriteString("INSERT INTO table_299 (name) VALUES ('first'), ('second');\n")
+	path := createDatabase(t, sql.String())
+
+	p, err := openDatabase(t, path).readPage(schemaPageNumber)
+	if err != nil {
+		t.Fatalf("readPage returned an error: %v", err)
+	}
+	if p.pageType != pageTypeInteriorTable {
+		t.Fatalf("the schema fits on a single page: page 1 has type 0x%02x", p.pageType)
+	}
+
+	want := fmt.Sprintf("database page size: 4096\nnumber of tables: %d\n", tableCount)
+	if got := runCommand(t, path, ".dbinfo"); got != want {
+		t.Errorf(".dbinfo output = %q, want %q", got, want)
+	}
+	if got, want := runCommand(t, path, ".tables"), strings.Join(names, " ")+"\n"; got != want {
+		t.Errorf(".tables output = %q, want %q", got, want)
+	}
+	if got, want := runCommand(t, path, "SELECT COUNT(*) FROM table_150"), "0\n"; got != want {
+		t.Errorf("count of table_150 = %q, want %q", got, want)
+	}
+	if got, want := runCommand(t, path, "SELECT id, name FROM table_299"), "1|first\n2|second\n"; got != want {
+		t.Errorf("rows of table_299 = %q, want %q", got, want)
+	}
+}
+
 func TestRunRejectsUnknownCommand(t *testing.T) {
 	var stdout bytes.Buffer
 	err := run(sampleDB, ".nope", &stdout)

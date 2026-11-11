@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -99,18 +100,148 @@ func TestCountRowsRejectsUnknownTables(t *testing.T) {
 	}
 }
 
-func TestCountRowsRejectsTablesThatSpanMultiplePages(t *testing.T) {
-	// 1,000 rows of about 60 bytes don't fit on a single 4096-byte page.
+func TestCountRowsOfTablesThatSpanMultiplePages(t *testing.T) {
+	for _, rowCount := range []int{1000, 25000} {
+		t.Run(fmt.Sprintf("%d rows", rowCount), func(t *testing.T) {
+			// Rows of about 60 bytes: about 60 of them fit on a page.
+			path := createDatabase(t, fmt.Sprintf(`
+				CREATE TABLE fruits (id integer primary key, name text);
+				WITH RECURSIVE numbers (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < %d)
+				INSERT INTO fruits (name) SELECT printf('fruit number %%050d', n) FROM numbers;
+			`, rowCount))
+
+			got := runCommand(t, path, "SELECT COUNT(*) FROM fruits")
+
+			if want := fmt.Sprintf("%d\n", rowCount); got != want {
+				t.Errorf("output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestSelectFromTableThatSpansMultiplePages compares the output of queries on
+// a table whose b-tree has three levels with the output of the sqlite3
+// command-line shell.
+func TestSelectFromTableThatSpansMultiplePages(t *testing.T) {
 	path := createDatabase(t, `
-		CREATE TABLE fruits (id integer primary key, name text);
-		WITH RECURSIVE numbers (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 1000)
-		INSERT INTO fruits (name) SELECT printf('fruit number %050d', n) FROM numbers;
+		PRAGMA page_size = 1024;
+		CREATE TABLE heroes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, eye_color TEXT, power INTEGER);
+		WITH RECURSIVE numbers (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 20000)
+		INSERT INTO heroes (name, eye_color, power)
+		SELECT
+			'Hero ' || n || ' (New Earth)',
+			CASE n % 7 WHEN 0 THEN 'Pink Eyes' WHEN 1 THEN 'Blue Eyes' WHEN 2 THEN NULL ELSE 'Brown Eyes' END,
+			(n * 7919) % 1000
+		FROM numbers;
+		-- Leave gaps between the rowids, and pages that are partly empty.
+		DELETE FROM heroes WHERE id % 5 = 3;
+		DELETE FROM heroes WHERE id > 6000 AND id < 9000;
 	`)
 
-	err := runSQLError(t, path, "SELECT COUNT(*) FROM fruits")
+	for _, sql := range []string{
+		"SELECT COUNT(*) FROM heroes",
+		"SELECT id, name, eye_color, power FROM heroes",
+		"SELECT id, name FROM heroes WHERE eye_color = 'Pink Eyes'",
+		"SELECT name FROM heroes WHERE eye_color != 'Brown Eyes'",
+		"SELECT COUNT(*) FROM heroes WHERE eye_color = 'Blue Eyes'",
+		"SELECT id, power FROM heroes WHERE power >= 990",
+		"SELECT name FROM heroes WHERE id = 19999",
+		"SELECT name FROM heroes WHERE id > 19990",
+		"SELECT name FROM heroes WHERE name = 'Hero 12345 (New Earth)'",
+		"SELECT id FROM heroes WHERE eye_color = 'Green Eyes'",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			got := runCommand(t, path, sql)
+			if want := sqlite3Output(t, path, sql); got != want {
+				t.Errorf("output differs from the output of sqlite3:\n got %d bytes: %.200q\nwant %d bytes: %.200q",
+					len(got), got, len(want), want)
+			}
+		})
+	}
+}
 
-	if !strings.Contains(err.Error(), "multiple pages") {
-		t.Errorf("error = %q, want it to mention that the table spans multiple pages", err)
+func TestSelectFromTableWhoseRowsWereAllDeleted(t *testing.T) {
+	path := createDatabase(t, `
+		CREATE TABLE fruits (id integer primary key, name text);
+		WITH RECURSIVE numbers (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 5000)
+		INSERT INTO fruits (name) SELECT printf('fruit number %050d', n) FROM numbers;
+		DELETE FROM fruits;
+	`)
+
+	if got, want := runCommand(t, path, "SELECT COUNT(*) FROM fruits"), "0\n"; got != want {
+		t.Errorf("count = %q, want %q", got, want)
+	}
+	if got := runCommand(t, path, "SELECT id, name FROM fruits"); got != "" {
+		t.Errorf("output = %q, want no output", got)
+	}
+}
+
+// superheroesDB is the database of superheroes that
+// download_sample_databases.sh downloads. Its superheroes table spans many
+// pages.
+const superheroesDB = "../superheroes.db"
+
+// requireFile skips the calling test if the file at path is missing.
+func requireFile(t *testing.T, path string) {
+	t.Helper()
+
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("%s is missing: run ./download_sample_databases.sh to download it", path)
+	}
+}
+
+func TestSelectFromSuperheroes(t *testing.T) {
+	requireFile(t, superheroesDB)
+
+	tests := []struct {
+		sql  string
+		want string
+	}{
+		{
+			"SELECT id, name FROM superheroes WHERE eye_color = 'Pink Eyes'",
+			"297|Stealth (New Earth)\n" +
+				"790|Tobias Whale (New Earth)\n" +
+				"1085|Felicity (New Earth)\n" +
+				"2729|Thrust (New Earth)\n" +
+				"3289|Angora Lapin (New Earth)\n" +
+				"3913|Matris Ater Clementia (New Earth)\n",
+		},
+		{"SELECT COUNT(*) FROM superheroes", "6895\n"},
+		{"select count(*) from superheroes where eye_color = 'Pink Eyes'", "6\n"},
+		{"SELECT name FROM superheroes WHERE id = 297", "Stealth (New Earth)\n"},
+		{"SELECT id FROM superheroes WHERE eye_color = 'No Such Eyes'", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			if got := runCommand(t, superheroesDB, tt.sql); got != tt.want {
+				t.Errorf("output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSelectFromSuperheroesMatchesSQLite compares the output of queries on
+// the database of superheroes with the output of the sqlite3 command-line
+// shell.
+func TestSelectFromSuperheroesMatchesSQLite(t *testing.T) {
+	requireFile(t, superheroesDB)
+
+	for _, sql := range []string{
+		"SELECT id, name, eye_color, hair_color, appearance_count, first_appearance, first_appearance_year FROM superheroes",
+		"SELECT id, name FROM superheroes WHERE eye_color = 'Blue Eyes'",
+		"SELECT name, hair_color FROM superheroes WHERE hair_color = 'Platinum Blond Hair'",
+		"SELECT COUNT(*) FROM superheroes WHERE first_appearance_year = '1986'",
+		"SELECT id, name FROM superheroes WHERE appearance_count > 1000",
+		"SELECT id FROM superheroes WHERE appearance_count = '12'",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			got := runCommand(t, superheroesDB, sql)
+			if want := sqlite3Output(t, superheroesDB, sql); got != want {
+				t.Errorf("output differs from the output of sqlite3:\n got %d bytes: %.200q\nwant %d bytes: %.200q",
+					len(got), got, len(want), want)
+			}
+		})
 	}
 }
 
