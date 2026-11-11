@@ -15,6 +15,10 @@ const databaseHeaderSize = 100
 // databaseHeaderMagic is the string every SQLite database file starts with.
 var databaseHeaderMagic = []byte("SQLite format 3\x00")
 
+// textEncodingUTF8 is the value of the text encoding field of the database
+// header of a database that stores its text as UTF-8.
+const textEncodingUTF8 = 1
+
 // database provides access to the pages of a SQLite database file.
 type database struct {
 	file io.ReaderAt
@@ -53,6 +57,13 @@ func newDatabase(file io.ReaderAt) (*database, error) {
 	usableSize := pageSize - int(header[20])
 	if usableSize < 480 {
 		return nil, fmt.Errorf("invalid usable page size %d", usableSize)
+	}
+
+	// The text encoding is a 4-byte big-endian integer at offset 56: 1 for
+	// UTF-8, 2 for UTF-16le and 3 for UTF-16be. It is 0 in a database that
+	// has never had any content.
+	if encoding := binary.BigEndian.Uint32(header[56:60]); encoding > textEncodingUTF8 {
+		return nil, fmt.Errorf("unsupported text encoding %d: only UTF-8 databases are supported", encoding)
 	}
 
 	return &database{file: file, pageSize: pageSize, usableSize: usableSize}, nil

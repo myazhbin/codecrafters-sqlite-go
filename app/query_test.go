@@ -647,6 +647,57 @@ func TestSelectColumnsRejectsUnknownColumns(t *testing.T) {
 	}
 }
 
+// TestSelectColumnsAddedLaterMatchesSQLite compares the output of queries on
+// a table that got columns with default values after rows were written to it
+// with the output of the sqlite3 command-line shell.
+func TestSelectColumnsAddedLaterMatchesSQLite(t *testing.T) {
+	path := createDatabase(t, `
+		CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+		INSERT INTO users (name) VALUES ('old 1'), ('old 2');
+		ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0;
+		ALTER TABLE users ADD COLUMN label TEXT DEFAULT 'none';
+		INSERT INTO users (name, is_admin) VALUES ('mid 3', 1);
+		ALTER TABLE users ADD COLUMN score REAL DEFAULT 5;
+		ALTER TABLE users ADD COLUMN neg INTEGER DEFAULT -42;
+		ALTER TABLE users ADD COLUMN textnum TEXT DEFAULT 7;
+		ALTER TABLE users ADD COLUMN intstr INTEGER DEFAULT '12';
+		ALTER TABLE users ADD COLUMN numreal NUMERIC DEFAULT 3.0;
+		ALTER TABLE users ADD COLUMN intfloat INTEGER DEFAULT '5.0';
+		ALTER TABLE users ADD COLUMN untyped DEFAULT 2.50;
+		ALTER TABLE users ADD COLUMN nul TEXT DEFAULT NULL;
+		ALTER TABLE users ADD COLUMN nodefault TEXT;
+		ALTER TABLE users ADD COLUMN flag DEFAULT TRUE;
+		ALTER TABLE users ADD COLUMN blobby DEFAULT x'6869';
+		ALTER TABLE users ADD COLUMN plus INTEGER DEFAULT +9;
+		ALTER TABLE users ADD COLUMN quoted TEXT DEFAULT "dq";
+		INSERT INTO users (name, label, score, neg) VALUES ('new 4', NULL, 1.5, 0);
+		CREATE INDEX idx_users_label ON users (label);
+	`)
+
+	for _, sql := range []string{
+		"SELECT id, name, is_admin, label, score, neg, textnum, intstr, numreal, intfloat, untyped, nul, nodefault, flag, blobby, plus, quoted FROM users",
+		"SELECT name FROM users WHERE is_admin = 0",
+		"SELECT name FROM users WHERE is_admin = 1",
+		"SELECT name FROM users WHERE score = 5",
+		"SELECT name FROM users WHERE score > 2",
+		"SELECT name FROM users WHERE textnum = 7",
+		"SELECT name FROM users WHERE intstr = 12",
+		"SELECT name FROM users WHERE nodefault = 'x'",
+		// These are answered with the index, which has entries with the
+		// default value for the rows that were written before the column
+		// was added.
+		"SELECT name, label FROM users WHERE label = 'none'",
+		"SELECT COUNT(*) FROM users WHERE label = 'none'",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			got := runCommand(t, path, sql)
+			if want := sqlite3Output(t, path, sql); got != want {
+				t.Errorf("output = %q, sqlite3 prints %q", got, want)
+			}
+		})
+	}
+}
+
 func TestSelectColumnOfEmptyTable(t *testing.T) {
 	path := createDatabase(t, "CREATE TABLE fruits (id integer primary key, name text);")
 

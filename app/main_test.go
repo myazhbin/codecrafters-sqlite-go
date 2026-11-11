@@ -218,6 +218,27 @@ func TestRunReportsMissingDatabaseFile(t *testing.T) {
 	}
 }
 
+func TestRunRejectsDatabasesThatAreNotUTF8(t *testing.T) {
+	// Text is only decoded correctly if it is stored as UTF-8.
+	path := createDatabase(t, `
+		PRAGMA encoding = 'UTF-16le';
+		CREATE TABLE fruits (id integer primary key, name text);
+		INSERT INTO fruits (name) VALUES ('apple');
+	`)
+
+	for _, command := range []string{".dbinfo", ".tables", "SELECT name FROM fruits"} {
+		var stdout bytes.Buffer
+		err := run(path, command, &stdout)
+		if err == nil {
+			t.Errorf("%s printed %q and returned no error", command, stdout.String())
+			continue
+		}
+		if !strings.Contains(err.Error(), "text encoding") {
+			t.Errorf("%s returned error %q, want it to mention the text encoding", command, err)
+		}
+	}
+}
+
 func TestRunRejectsFilesThatAreNotDatabases(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := run("main.go", ".tables", &stdout); err == nil {

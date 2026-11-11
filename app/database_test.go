@@ -82,6 +82,31 @@ func TestNewDatabaseRejectsTooMuchReservedSpace(t *testing.T) {
 	}
 }
 
+func TestNewDatabaseChecksTextEncoding(t *testing.T) {
+	tests := []struct {
+		name     string
+		encoding byte
+		wantErr  bool
+	}{
+		{"database without content", 0, false},
+		{"UTF-8", 1, false},
+		{"UTF-16le", 2, true},
+		{"UTF-16be", 3, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			header := newHeader(4096)
+			header[59] = tt.encoding // The last byte of the big-endian field.
+
+			_, err := newDatabase(bytes.NewReader(header))
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf("newDatabase returned error %v, want an error: %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestNewDatabaseRejectsTruncatedHeader(t *testing.T) {
 	truncated := newHeader(4096)[:databaseHeaderSize-1]
 

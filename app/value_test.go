@@ -258,6 +258,59 @@ func TestParseNumberRejectsOtherText(t *testing.T) {
 	}
 }
 
+func TestApplyAffinity(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    any
+		affinity affinity
+		want     any
+	}{
+		{"integer in a text column", int64(7), affinityText, "7"},
+		{"real in a text column", 2.5, affinityText, "2.5"},
+		{"whole real in a text column", 2.0, affinityText, "2.0"},
+		{"text in a text column", "7", affinityText, "7"},
+		{"blob in a text column", []byte("7"), affinityText, []byte("7")},
+
+		{"integer text in an integer column", "12", affinityInteger, int64(12)},
+		{"real text in an integer column", "5.5", affinityInteger, 5.5},
+		{"whole real text in an integer column", "5.0", affinityInteger, int64(5)},
+		{"other text in an integer column", "five", affinityInteger, "five"},
+		{"whole real in an integer column", 3.0, affinityInteger, int64(3)},
+		{"negative zero in an integer column", math.Copysign(0, -1), affinityInteger, int64(0)},
+		{"real in an integer column", 3.5, affinityInteger, 3.5},
+		{"whole real in a numeric column", 3.0, affinityNumeric, int64(3)},
+		{"integer text in a numeric column", " 12 ", affinityNumeric, int64(12)},
+		// Columns with REAL affinity store whole numbers as integers, and
+		// convert them back when they're read.
+		{"integer in a real column", int64(5), affinityReal, int64(5)},
+		{"whole real in a real column", 5.0, affinityReal, int64(5)},
+		{"real in a real column", 5.25, affinityReal, 5.25},
+		{"integer text in a real column", "3", affinityReal, int64(3)},
+		// Numbers that are too large for an integer stay as they are.
+		{"huge real in an integer column", 1e300, affinityInteger, 1e300},
+		{"2^63 in an integer column", 9223372036854775808.0, affinityInteger, 9223372036854775808.0},
+		{"-2^63 in an integer column", -9223372036854775808.0, affinityInteger, -9223372036854775808.0},
+		{"infinity in an integer column", math.Inf(1), affinityInteger, math.Inf(1)},
+		{"blob in an integer column", []byte("12"), affinityInteger, []byte("12")},
+
+		{"integer text in an untyped column", "12", affinityBlob, "12"},
+		{"whole real in an untyped column", 3.0, affinityBlob, 3.0},
+		{"integer in an untyped column", int64(3), affinityBlob, int64(3)},
+
+		{"NULL in a text column", nil, affinityText, nil},
+		{"NULL in an integer column", nil, affinityInteger, nil},
+		{"NULL in a real column", nil, affinityReal, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := applyAffinity(tt.value, tt.affinity); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("applyAffinity(%#v, %d) = %#v, want %#v", tt.value, tt.affinity, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConvertForComparison(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -271,7 +324,8 @@ func TestConvertForComparison(t *testing.T) {
 		{"padded integer text with an integer column", " 7 ", affinityInteger, int64(7)},
 		{"real text with an integer column", "3.5", affinityInteger, 3.5},
 		{"integer text with a real column", "3", affinityReal, int64(3)},
-		{"real text with a numeric column", "1e2", affinityNumeric, 100.0},
+		{"real text with a numeric column", "1e2", affinityNumeric, int64(100)},
+		{"whole real with a real column", 2.0, affinityReal, int64(2)},
 		{"other text with an integer column", "abc", affinityInteger, "abc"},
 		{"empty text with a numeric column", "", affinityNumeric, ""},
 		{"integer with an integer column", int64(3), affinityInteger, int64(3)},

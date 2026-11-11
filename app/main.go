@@ -7,8 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	// Available if you need it!
-	// "github.com/xwb1989/sqlparser"
 )
 
 // Usage: your_program.sh sample.db .dbinfo

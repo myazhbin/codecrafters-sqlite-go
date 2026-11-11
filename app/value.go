@@ -57,27 +57,49 @@ func typeAffinity(declaredType string) affinity {
 	}
 }
 
+// applyAffinity converts a value the way SQLite does before it stores the
+// value in a column with the given affinity.
+func applyAffinity(value any, columnAffinity affinity) any {
+	switch columnAffinity {
+	case affinityText:
+		// Numbers are stored as text.
+		switch value.(type) {
+		case int64, float64:
+			return formatValue(value)
+		}
+
+	case affinityInteger, affinityNumeric, affinityReal:
+		// Text that spells out a number is stored as that number.
+		if text, ok := value.(string); ok {
+			number, ok := parseNumber(text)
+			if !ok {
+				return value
+			}
+			value = number
+		}
+		// A floating point number is stored as an integer if that doesn't
+		// change its value. Columns with REAL affinity do the same, but their
+		// integers are read back as floating point numbers.
+		if float, ok := value.(float64); ok && float > -(1<<63) && float < 1<<63 {
+			if integer := int64(float); float64(integer) == float {
+				return integer
+			}
+		}
+	}
+	return value
+}
+
 // convertForComparison converts a literal value for a comparison with the
 // values of a column that has the given affinity. SQLite applies these
 // conversions so that, for example, the text '3' equals the number 3 in a
 // column of integers.
 func convertForComparison(literal any, columnAffinity affinity) any {
 	switch columnAffinity {
-	case affinityInteger, affinityReal, affinityNumeric:
-		// Text that spells out a number is compared as that number.
-		if text, ok := literal.(string); ok {
-			if number, ok := parseNumber(text); ok {
-				return number
-			}
-		}
-	case affinityText:
-		// Numbers are compared as text.
-		switch literal.(type) {
-		case int64, float64:
-			return formatValue(literal)
-		}
+	case affinityInteger, affinityReal:
+		// The values of all numeric columns are compared as numbers.
+		columnAffinity = affinityNumeric
 	}
-	return literal
+	return applyAffinity(literal, columnAffinity)
 }
 
 // The collating sequences, which are the ways in which SQLite can compare

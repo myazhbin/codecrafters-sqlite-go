@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"errors"
 	"strings"
 )
@@ -28,6 +29,10 @@ type columnDefinition struct {
 	// declared with, in upper case. It is empty for a column that is declared
 	// without one, which then uses the default of collationBinary.
 	collation string
+	// defaultValue is the value that the column is declared to have in rows
+	// that don't provide one. It is nil for a column that is declared without
+	// a default value, or with one that isn't a literal value.
+	defaultValue any
 }
 
 // affinity returns the type that the column prefers to store its values as.
@@ -133,9 +138,10 @@ func parseCreateTable(sql string) (*tableDefinition, error) {
 	return table, nil
 }
 
-// definitionItem consumes the tokens of the next column definition or table
-// constraint of a CREATE TABLE statement. That is every token up to the comma
-// or the closing parenthesis that ends the item.
+// definitionItem consumes the tokens of the next item of the list in
+// parentheses of a CREATE statement, like a column definition of a CREATE
+// TABLE statement. That is every token up to the comma or the closing
+// parenthesis that ends the item.
 func (p *parser) definitionItem() ([]token, error) {
 	start := p.pos
 	depth := 0
@@ -256,6 +262,8 @@ func parseColumnDefinition(definition []token) (column columnDefinition, isRowID
 			return columnDefinition{}, false, errors.New("tables with generated columns are not supported")
 		case t.isKeyword("COLLATE") && following(1).kind == tokenIdentifier:
 			column.collation = strings.ToUpper(following(1).text)
+		case t.isKeyword("DEFAULT"):
+			column.defaultValue = applyAffinity(literalDefault(definition[i+1:]), column.affinity())
 		case t.isKeyword("PRIMARY") && following(1).isKeyword("KEY"):
 			// A column declared as INTEGER PRIMARY KEY is an alias for the
 			// rowid. Due to a quirk of SQLite, that's not the case for
@@ -264,6 +272,47 @@ func parseColumnDefinition(definition []token) (column columnDefinition, isRowID
 		}
 	}
 	return column, isRowID, nil
+}
+
+// literalDefault returns the value of a DEFAULT clause whose value is a
+// literal, given the tokens that follow the DEFAULT keyword. It returns nil
+// for the other default values, like expressions in parentheses. Those don't
+// matter for reading a table: a row only lacks the value of a column if the
+// column was added to the table after the row was written, and SQLite only
+// lets columns with literal default values be added to a table.
+func literalDefault(tokens []token) any {
+	at := func(i int) token {
+		if i < len(tokens) {
+			return tokens[i]
+		}
+		return token{kind: tokenEOF}
+	}
+
+	switch t := at(0); {
+	case t.kind == tokenString:
+		return t.text
+	case t.kind == tokenIdentifier && t.quoted:
+		// SQLite reads a name in double quotes that can't be a name as a
+		// string.
+		return t.text
+	case t.kind == tokenNumber:
+		number, _ := parseNumber(t.text)
+		return number
+	case (t.isSymbol("-") || t.isSymbol("+")) && at(1).kind == tokenNumber:
+		number, _ := parseNumber(t.text + at(1).text)
+		return number
+	case t.isKeyword("TRUE"):
+		return int64(1)
+	case t.isKeyword("FALSE"):
+		return int64(0)
+	case t.isKeyword("X") && at(1).kind == tokenString:
+		// A blob literal is a string of hexadecimal digits that follows an
+		// X, like x'68656c6c6f'.
+		if blob, err := hex.DecodeString(at(1).text); err == nil {
+			return blob
+		}
+	}
+	return nil
 }
 
 // indexDefinition is a parsed CREATE INDEX statement.

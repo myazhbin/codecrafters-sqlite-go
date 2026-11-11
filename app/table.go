@@ -129,13 +129,15 @@ func (r row) value(column int) any {
 		// the rowid.
 		return r.rowID
 	}
-	if column >= len(r.values) {
-		// The column was added to the table after the row was written.
-		return nil
-	}
 
-	value := r.values[column]
-	if integer, ok := value.(int64); ok && r.table.columns[column].affinity() == affinityReal {
+	definition := r.table.columns[column]
+	// A row that was written before the column was added to the table has no
+	// value for the column, which then has its default value.
+	value := definition.defaultValue
+	if column < len(r.values) {
+		value = r.values[column]
+	}
+	if integer, ok := value.(int64); ok && definition.affinity() == affinityReal {
 		// To save space, SQLite stores a floating point number without a
 		// fractional part as an integer.
 		return float64(integer)

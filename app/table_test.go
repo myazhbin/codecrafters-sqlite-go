@@ -159,6 +159,46 @@ func TestRowValue(t *testing.T) {
 	}
 }
 
+func TestRowValueOfColumnsAddedLater(t *testing.T) {
+	// The rows that were written before a column was added to their table
+	// have no value for the column, which then has its default value.
+	table := &table{
+		name: "t",
+		columns: []columnDefinition{
+			{name: "name", declaredType: "TEXT"},
+			{name: "is_admin", declaredType: "INTEGER", defaultValue: int64(0)},
+			{name: "label", declaredType: "TEXT", defaultValue: "none"},
+			{name: "score", declaredType: "REAL", defaultValue: int64(5)},
+			{name: "notes", declaredType: "TEXT"},
+		},
+		rowIDColumn: -1,
+	}
+
+	tests := []struct {
+		name   string
+		values []any
+		want   []any
+	}{
+		{"row from before the columns were added", []any{"old"}, []any{"old", int64(0), "none", 5.0, nil}},
+		{"row from before the last columns were added", []any{"mid", int64(1), "x"}, []any{"mid", int64(1), "x", 5.0, nil}},
+		// A value that is stored in the row is used, even if it's NULL.
+		{"row with all the columns", []any{"new", nil, nil, nil, "n"}, []any{"new", nil, nil, nil, "n"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := row{table: table, rowID: 1, values: tt.values}
+			got := make([]any, len(table.columns))
+			for i := range table.columns {
+				got[i] = r.value(i)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("values = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRowValueKeepsStoredValues(t *testing.T) {
 	table := &table{name: "t", columns: columns("a", "REAL", "b", "", "c", "TEXT"), rowIDColumn: -1}
 	// SQLite is dynamically typed: any column can hold a value of any type.
